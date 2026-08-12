@@ -1,0 +1,61 @@
+[runtime]
+# host = "bybit-sg" # 省略时读取 hostname
+interval = "30s"
+state_dir = "/var/lib/alertd"
+log_level = "info"
+
+[alarm]
+pending_for = "90s"
+warn_repeat = "30m"
+critical_repeat = "10m"
+daily_report_at = "02:00" # 设为 "off" 关闭日报
+collect_fail_after_n = 3
+
+[delivery]
+token_env = "ALERTD_DINGTALK_TOKEN"
+secret_env = "ALERTD_DINGTALK_SECRET"
+timeout = "3s"
+queue_capacity = 1024
+retry_initial = "5s"
+retry_max = "5m"
+at_all_on_critical = false
+
+[[checks]]
+name = "bybit-market"
+type = "process"
+cmdline_contains = "/current/bin/bybit_perp_market"
+min_count = 1
+runbook = "https://runbook.example/process-down"
+
+[[checks]]
+name = "bybit-book"
+type = "shm"
+path = "/shm_bybit_lin_book_tick_v2"
+probe = "gconf_v2"
+magic = 0 # 部署前填写对应 gconf SegHeader 的十进制 magic
+layout_version = 2
+require_progress = true
+stale_after = "180s"
+
+[[checks]]
+name = "service-errors"
+type = "journal"
+units = ["bybit-perp-market.service"]
+rules = [
+  { contains = "WARN", severity = "warn" },
+  { contains = "ERROR", severity = "critical" },
+  { contains = "FATAL", severity = "critical" },
+]
+
+[[checks]]
+name = "data-disk"
+type = "disk"
+mount = "/mnt/jt"
+warn_used_pct = 80
+critical_used_pct = 90
+
+[[checks]]
+name = "available-memory"
+type = "memory"
+warn_available_pct = 20
+critical_available_pct = 10

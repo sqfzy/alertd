@@ -1,0 +1,79 @@
+[runtime]
+host = "sg-alertd-test"
+interval = "10s"
+state_dir = "/var/lib/alertd-test"
+log_level = "info"
+
+[alarm]
+pending_for = "10s"
+warn_repeat = "1m"
+critical_repeat = "1m"
+daily_report_at = "off"
+collect_fail_after_n = 3
+
+[delivery]
+token_env = "ALERTD_DINGTALK_TOKEN"
+secret_env = "ALERTD_DINGTALK_SECRET"
+timeout = "3s"
+queue_capacity = 128
+retry_initial = "5s"
+retry_max = "1m"
+at_all_on_critical = false
+
+[[checks]]
+name = "alertd-process"
+type = "process"
+cmdline_contains = "/opt/alertd-test/alertd"
+min_count = 1
+
+[[checks]]
+name = "test-probe-process"
+type = "process"
+cmdline_contains = "alertd-test-probe-marker"
+min_count = 1
+
+[[checks]]
+name = "bybit-book-shm-exists"
+type = "shm"
+path = "/shm_bybit_lin_book_tick_v2"
+probe = "exists"
+
+[[checks]]
+name = "alertd-test-counter"
+type = "shm"
+path = "/alertd_test_counter"
+probe = "u64_counter"
+require_progress = true
+stale_after = "20s"
+offset = 0
+endian = "little"
+
+[[checks]]
+name = "alertd-test-journal"
+type = "journal"
+units = ["alertd-journal-fixture.service"]
+rules = [
+  { contains = "ALERTD_TEST_WARN", severity = "warn" },
+  { contains = "ALERTD_TEST_ERROR", severity = "critical" },
+]
+
+[[checks]]
+name = "root-disk"
+type = "disk"
+mount = "/"
+warn_used_pct = 80
+critical_used_pct = 90
+
+[[checks]]
+name = "data-disk"
+type = "disk"
+mount = "/mnt/jt"
+warn_used_pct = 80
+critical_used_pct = 90
+
+[[checks]]
+name = "available-memory"
+type = "memory"
+warn_available_pct = 20
+critical_available_pct = 10
+

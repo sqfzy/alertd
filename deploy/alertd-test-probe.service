@@ -1,0 +1,12 @@
+[Unit]
+Description=alertd process liveness acceptance fixture
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c 'exec -a alertd-test-probe-marker sleep infinity'
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+

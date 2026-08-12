@@ -1,0 +1,34 @@
+[package]
+name = "alertd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Lightweight, configuration-driven Linux alert daemon"
+license = "MIT"
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+hmac = "0.12"
+hostname = "0.4"
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+signal-hook = "0.3"
+thiserror = "2"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+urlencoding = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+

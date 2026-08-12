@@ -1,0 +1,18 @@
+[Unit]
+Description=alertd isolated acceptance test
+After=network-online.target alertd-test-probe.service
+Wants=network-online.target alertd-test-probe.service
+
+[Service]
+Type=simple
+ExecStart=/opt/alertd-test/alertd --config /etc/alertd-test/alertd.toml
+EnvironmentFile=/etc/alertd-test/alertd.env
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+

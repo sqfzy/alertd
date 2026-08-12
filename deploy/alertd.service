@@ -1,0 +1,22 @@
+[Unit]
+Description=alertd host and application alert daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/alertd --config /etc/alertd/alertd.toml
+EnvironmentFile=/etc/alertd/alertd.env
+StateDirectory=alertd
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/alertd
+
+[Install]
+WantedBy=multi-user.target
+
