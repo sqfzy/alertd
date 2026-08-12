@@ -56,3 +56,41 @@ fn validates_optional_runtime_ip() {
     .unwrap();
     assert!(config::validate_config(&invalid_ip).is_err());
 }
+
+#[test]
+fn validates_systemd_and_latest_file_contracts() {
+    let text = r#"
+[runtime]
+interval = "10s"
+
+[[checks]]
+name = "units"
+type = "systemd"
+units = ["app.service", "archive.timer"]
+
+[[checks]]
+name = "raw"
+type = "latest_file"
+directory = "/var/lib/app/raw"
+prefix = "raw_"
+suffix = ".bin"
+stale_after = "20s"
+minimum_size_bytes = 384
+"#;
+    let valid_checks: Config = toml::from_str(text).unwrap();
+    config::validate_config(&valid_checks).unwrap();
+
+    let bad_path: Config =
+        toml::from_str(&text.replace("/var/lib/app/raw", "relative/raw")).unwrap();
+    assert!(config::validate_config(&bad_path).is_err());
+
+    let bad_age: Config =
+        toml::from_str(&text.replace("stale_after = \"20s\"", "stale_after = \"5s\"")).unwrap();
+    assert!(config::validate_config(&bad_age).is_err());
+}
+
+#[test]
+fn accepts_tickfeat_production_config() {
+    let config = config::load_config(std::path::Path::new("config/tickfeat-bn-spot.toml")).unwrap();
+    assert_eq!(config.checks.len(), 15);
+}

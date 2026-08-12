@@ -1,0 +1,149 @@
+[runtime]
+host = "tokyo-tickfeat"
+ip = "13.159.108.193"
+interval = "10s"
+state_dir = "/var/lib/alertd"
+log_level = "info"
+
+[alarm]
+pending_for = "30s"
+warn_repeat = "30m"
+critical_repeat = "10m"
+daily_report_at = "09:00"
+collect_fail_after_n = 3
+
+[delivery]
+token_env = "ALERTD_DINGTALK_TOKEN"
+secret_env = "ALERTD_DINGTALK_SECRET"
+timeout = "3s"
+queue_capacity = 1024
+retry_initial = "5s"
+retry_max = "5m"
+at_all_on_critical = false
+
+[[checks]]
+name = "tickfeat-units"
+type = "systemd"
+units = [
+  "tickfeat-bn-spot-book-tick.service",
+  "tickfeat-live-bn-spot.service",
+  "tickfeat-factor-shm.service",
+  "tickfeat-factor-archive.timer",
+]
+
+[[checks]]
+name = "bn-spot-book-writer"
+type = "process"
+cmdline_contains = "bn_read_all_market_dpdk_ens7_colo_mm/zt_bn_read_all_market_dpdk_ens7_colo_mm 2"
+min_count = 1
+
+[[checks]]
+name = "bn-swap-book-writers"
+type = "process"
+cmdline_contains = "bn_read_booktick_raw_dpdk_ens7_colo_mm/zt_bn_read_booktick_raw_dpdk_ens7_colo_mm"
+min_count = 2
+
+[[checks]]
+name = "bn-spot-book-publisher"
+type = "process"
+cmdline_contains = "tickfeat_book_tick_board_publish /shm_bn_spot_book_tick_ring_v2 /shm_bn_spot_book_tick_v2"
+min_count = 1
+
+[[checks]]
+name = "bn-spot-mean-v2"
+type = "process"
+cmdline_contains = "--primary-book /shm_bn_spot_book_tick_v2 --only-factors legacy.mean_v2"
+min_count = 1
+
+[[checks]]
+name = "bn-spot-book-ring"
+type = "shm"
+path = "/shm_bn_spot_book_tick_ring_v2"
+probe = "gconf_v2"
+magic = 1195591218
+layout_version = 2
+require_progress = true
+stale_after = "60s"
+
+[[checks]]
+name = "bn-spot-book-board"
+type = "shm"
+path = "/shm_bn_spot_book_tick_v2"
+probe = "gconf_v2"
+magic = 1195591218
+layout_version = 2
+require_progress = true
+stale_after = "60s"
+
+[[checks]]
+name = "bn-swap-book-board"
+type = "shm"
+path = "/shm_bn_swap_book_tick_v2"
+probe = "gconf_v2"
+magic = 1195591218
+layout_version = 2
+require_progress = true
+stale_after = "60s"
+
+[[checks]]
+name = "mean-v2-factor-board"
+type = "shm"
+path = "/shm_tickfeat_factor_bn_spot_bn_swap"
+probe = "gconf_v2"
+magic = 1195591218
+layout_version = 2
+require_progress = true
+stale_after = "90s"
+
+[[checks]]
+name = "mean-v2-raw"
+type = "latest_file"
+directory = "/var/lib/tickfeat/instances/bn-spot-bn-swap/raw"
+prefix = "tickfeat_raw_"
+suffix = ".bin"
+stale_after = "120s"
+minimum_size_bytes = 384
+
+[[checks]]
+name = "mean-v2-jsonl"
+type = "latest_file"
+directory = "/var/lib/tickfeat/instances/bn-spot-bn-swap/factors"
+prefix = "online_factor"
+suffix = ".jsonl"
+stale_after = "120s"
+minimum_size_bytes = 1
+
+[[checks]]
+name = "tickfeat-journal"
+type = "journal"
+units = [
+  "tickfeat-live-bn-spot.service",
+  "tickfeat-bn-spot-book-tick.service",
+  "tickfeat-factor-archive.service",
+]
+rules = [
+  { contains = "WARN", severity = "warn" },
+  { contains = "ERROR", severity = "critical" },
+  { contains = "fatal", severity = "critical" },
+  { contains = "Failed", severity = "critical" },
+]
+
+[[checks]]
+name = "root-disk"
+type = "disk"
+mount = "/"
+warn_used_pct = 80
+critical_used_pct = 90
+
+[[checks]]
+name = "shared-memory-disk"
+type = "disk"
+mount = "/dev/shm"
+warn_used_pct = 70
+critical_used_pct = 85
+
+[[checks]]
+name = "available-memory"
+type = "memory"
+warn_available_pct = 20
+critical_available_pct = 10

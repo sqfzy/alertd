@@ -63,6 +63,9 @@ fn default_probe() -> ShmProbe {
 fn default_collect_failures() -> u32 {
     3
 }
+fn default_minimum_size_bytes() -> u64 {
+    1
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -181,6 +184,18 @@ pub enum CheckKind {
     Journal {
         units: Vec<String>,
         rules: Vec<JournalRule>,
+    },
+    Systemd {
+        units: Vec<String>,
+    },
+    LatestFile {
+        directory: PathBuf,
+        prefix: String,
+        #[serde(default)]
+        suffix: String,
+        stale_after: String,
+        #[serde(default = "default_minimum_size_bytes")]
+        minimum_size_bytes: u64,
     },
     Disk {
         mount: PathBuf,
@@ -488,6 +503,43 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
                 "check {} needs journal units and non-empty warn/critical rules",
                 check.name
             )))
+        }
+        CheckKind::Systemd { units }
+            if units.is_empty()
+                || units.len() > 64
+                || units.iter().any(|unit| unit.is_empty() || unit.len() > 255) =>
+        {
+            Err(ConfigError::Invalid(format!(
+                "check {} needs 1..=64 non-empty systemd units",
+                check.name
+            )))
+        }
+        CheckKind::LatestFile {
+            directory,
+            prefix,
+            suffix,
+            stale_after,
+            minimum_size_bytes,
+        } => {
+            if !directory.is_absolute()
+                || prefix.is_empty()
+                || prefix.len() > 255
+                || suffix.len() > 255
+                || *minimum_size_bytes == 0
+                || *minimum_size_bytes > 1_u64 << 40
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "check {} has invalid latest_file path, matcher, or size",
+                    check.name
+                )));
+            }
+            duration_range(
+                "checks.latest_file.stale_after",
+                stale_after,
+                interval,
+                Duration::from_secs(86_400),
+            )?;
+            Ok(())
         }
         CheckKind::Disk {
             mount,

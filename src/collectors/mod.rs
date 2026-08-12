@@ -1,8 +1,10 @@
 pub mod disk;
 pub mod journal;
+pub mod latest_file;
 pub mod memory;
 pub mod process;
 pub mod shm;
+pub mod systemd;
 
 use crate::{
     config::{CheckConfig, CheckKind},
@@ -61,6 +63,21 @@ pub fn collect(
             context,
         ),
         CheckKind::Journal { units, rules } => journal::collect(check, units, rules, context),
+        CheckKind::Systemd { units } => systemd::collect(check, units),
+        CheckKind::LatestFile {
+            directory,
+            prefix,
+            suffix,
+            stale_after,
+            minimum_size_bytes,
+        } => latest_file::collect(
+            check,
+            directory,
+            prefix,
+            suffix,
+            stale_after,
+            *minimum_size_bytes,
+        ),
         CheckKind::Disk {
             mount,
             warn_used_pct,

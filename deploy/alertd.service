@@ -8,6 +8,8 @@ Type=simple
 ExecStart=/usr/local/bin/alertd --config /etc/alertd/alertd.toml
 EnvironmentFile=/etc/alertd/alertd.env
 StateDirectory=alertd
+CPUAffinity=0
+Nice=10
 Restart=always
 RestartSec=10
 TimeoutStopSec=15
@@ -19,4 +21,3 @@ ReadWritePaths=/var/lib/alertd
 
 [Install]
 WantedBy=multi-user.target
-

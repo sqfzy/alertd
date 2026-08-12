@@ -10,6 +10,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const GCONF_HEADER_BYTES: usize = 64;
+const GCONF_RING_ENTRIES_OFFSET: usize = 128;
+const GCONF_BOARD_KIND: u16 = 1;
+const GCONF_BCAST_RING_KIND: u16 = 2;
+
 #[derive(Clone, Debug)]
 pub struct ProgressState {
     pub fingerprint: u64,
@@ -34,12 +39,26 @@ fn read_u64(bytes: &[u8], offset: usize, endian: Endian) -> Result<u64, CollectE
     })
 }
 
-fn gconf_fingerprint(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GconfSegment {
+    kind: u16,
+    entry_size: usize,
+    capacity: usize,
+    fingerprint: u64,
+}
+
+fn hash_u64(hash: u64, value: u64) -> u64 {
+    value.to_le_bytes().into_iter().fold(hash, |current, byte| {
+        (current ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
+    })
+}
+
+fn gconf_segment(
     bytes: &[u8],
     expected_magic: u32,
     expected_version: u16,
-) -> Result<u64, CollectError> {
-    if bytes.len() < 72 {
+) -> Result<GconfSegment, CollectError> {
+    if bytes.len() < GCONF_HEADER_BYTES {
         return Err(CollectError::Invalid("gconf_v2 header is truncated".into()));
     }
     let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
@@ -49,7 +68,65 @@ fn gconf_fingerprint(
             "gconf_v2 header mismatch magic=0x{magic:08x} version={version}"
         )));
     }
-    Ok(u64::from_le_bytes(bytes[64..72].try_into().unwrap()))
+    let kind = u16::from_le_bytes(bytes[6..8].try_into().unwrap());
+    let entry_size = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let capacity = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    if entry_size < 8 || capacity == 0 {
+        return Err(CollectError::Invalid(format!(
+            "gconf_v2 invalid entry_size={entry_size} capacity={capacity}"
+        )));
+    }
+    let entries_bytes = entry_size
+        .checked_mul(capacity)
+        .ok_or_else(|| CollectError::Invalid("gconf_v2 entry bytes overflow".into()))?;
+    let fingerprint = match kind {
+        GCONF_BCAST_RING_KIND => {
+            let expected_size = GCONF_RING_ENTRIES_OFFSET
+                .checked_add(entries_bytes)
+                .ok_or_else(|| CollectError::Invalid("gconf_v2 ring size overflow".into()))?;
+            if bytes.len() != expected_size {
+                return Err(CollectError::Invalid(format!(
+                    "gconf_v2 ring size mismatch actual={} expected={expected_size}",
+                    bytes.len()
+                )));
+            }
+            read_u64(bytes, GCONF_HEADER_BYTES, Endian::Little)?
+        }
+        GCONF_BOARD_KIND => {
+            let slots_offset = bytes
+                .len()
+                .checked_sub(entries_bytes)
+                .filter(|offset| *offset >= GCONF_HEADER_BYTES)
+                .ok_or_else(|| {
+                    CollectError::Invalid(format!(
+                        "gconf_v2 board slots outside file size={} entries={entries_bytes}",
+                        bytes.len()
+                    ))
+                })?;
+            let heartbeat = read_u64(bytes, 32, Endian::Little)?;
+            (0..capacity).try_fold(
+                hash_u64(1_469_598_103_934_665_603, heartbeat),
+                |hash, index| {
+                    let offset = slots_offset + index * entry_size;
+                    Ok::<u64, CollectError>(hash_u64(
+                        hash,
+                        read_u64(bytes, offset, Endian::Little)?,
+                    ))
+                },
+            )?
+        }
+        _ => {
+            return Err(CollectError::Invalid(format!(
+                "gconf_v2 unsupported SegKind={kind}"
+            )));
+        }
+    };
+    Ok(GconfSegment {
+        kind,
+        entry_size,
+        capacity,
+        fingerprint,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -75,26 +152,44 @@ pub fn collect(
         )
         .detail("对象", name));
     }
-    if probe == ShmProbe::Exists || !require_progress {
+    if probe == ShmProbe::Exists {
         return Ok(Observation::healthy(&check.name, "SHM 存在且非空")
             .detail("对象", name)
             .detail("大小", metadata.len().to_string()));
     }
     let bytes = fs::read(&path)?;
-    let fingerprint = match probe {
-        ShmProbe::Exists => metadata.len(),
-        ShmProbe::U64Counter => read_u64(
-            &bytes,
-            offset.unwrap_or_default() as usize,
-            endian.unwrap_or(Endian::Little),
-        )?,
-        ShmProbe::GconfV2 => gconf_fingerprint(
-            &bytes,
-            magic.ok_or_else(|| CollectError::Invalid("gconf_v2 magic missing".into()))?,
-            layout_version
-                .ok_or_else(|| CollectError::Invalid("gconf_v2 layout_version missing".into()))?,
-        )?,
+    let (fingerprint, contract) = match probe {
+        ShmProbe::Exists => unreachable!("exists returned before reading SHM"),
+        ShmProbe::U64Counter => (
+            read_u64(
+                &bytes,
+                offset.unwrap_or_default() as usize,
+                endian.unwrap_or(Endian::Little),
+            )?,
+            None,
+        ),
+        ShmProbe::GconfV2 => {
+            let segment = gconf_segment(
+                &bytes,
+                magic.ok_or_else(|| CollectError::Invalid("gconf_v2 magic missing".into()))?,
+                layout_version.ok_or_else(|| {
+                    CollectError::Invalid("gconf_v2 layout_version missing".into())
+                })?,
+            )?;
+            (segment.fingerprint, Some(segment))
+        }
     };
+    if !require_progress {
+        let mut observation =
+            Observation::healthy(&check.name, "SHM 契约有效").detail("对象", name);
+        if let Some(segment) = contract {
+            observation = observation
+                .detail("SegKind", segment.kind.to_string())
+                .detail("entry_size", segment.entry_size.to_string())
+                .detail("capacity", segment.capacity.to_string());
+        }
+        return Ok(observation);
+    }
     let now = Utc::now();
     let entry = context
         .shm_progress
@@ -145,5 +240,47 @@ mod tests {
             1
         );
         assert!(read_u64(&[0; 7], 0, Endian::Little).is_err());
+    }
+
+    fn header(kind: u16, entry_size: u32, capacity: u32) -> [u8; 64] {
+        let mut bytes = [0_u8; 64];
+        bytes[0..4].copy_from_slice(&0x4743_4632_u32.to_le_bytes());
+        bytes[4..6].copy_from_slice(&2_u16.to_le_bytes());
+        bytes[6..8].copy_from_slice(&kind.to_le_bytes());
+        bytes[8..12].copy_from_slice(&entry_size.to_le_bytes());
+        bytes[12..16].copy_from_slice(&capacity.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn fingerprints_ring_head_and_validates_size() {
+        let mut bytes = vec![0_u8; 128 + 4 * 64];
+        bytes[..64].copy_from_slice(&header(GCONF_BCAST_RING_KIND, 64, 4));
+        bytes[64..72].copy_from_slice(&7_u64.to_le_bytes());
+        let segment = gconf_segment(&bytes, 0x4743_4632, 2).unwrap();
+        assert_eq!(segment.fingerprint, 7);
+        bytes.pop();
+        assert!(gconf_segment(&bytes, 0x4743_4632, 2).is_err());
+    }
+
+    #[test]
+    fn fingerprints_board_slots_from_file_tail() {
+        let mut bytes = vec![0_u8; 256 + 3 * 64];
+        bytes[..64].copy_from_slice(&header(GCONF_BOARD_KIND, 64, 3));
+        bytes[32..40].copy_from_slice(&11_u64.to_le_bytes());
+        bytes[256..264].copy_from_slice(&2_u64.to_le_bytes());
+        bytes[320..328].copy_from_slice(&4_u64.to_le_bytes());
+        let first = gconf_segment(&bytes, 0x4743_4632, 2).unwrap();
+        bytes[384..392].copy_from_slice(&6_u64.to_le_bytes());
+        let second = gconf_segment(&bytes, 0x4743_4632, 2).unwrap();
+        assert_ne!(first.fingerprint, second.fingerprint);
+    }
+
+    #[test]
+    fn rejects_bad_header_kind_and_overflow() {
+        let mut bytes = vec![0_u8; 64];
+        bytes[..64].copy_from_slice(&header(3, 64, 1));
+        assert!(gconf_segment(&bytes, 0x4743_4632, 2).is_err());
+        assert!(gconf_segment(&bytes, 0, 2).is_err());
     }
 }

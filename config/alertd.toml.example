@@ -49,6 +49,20 @@ rules = [
 ]
 
 [[checks]]
+name = "market-units"
+type = "systemd"
+units = ["market.service", "market-archive.timer"]
+
+[[checks]]
+name = "market-raw"
+type = "latest_file"
+directory = "/var/lib/market/raw"
+prefix = "market_raw_"
+suffix = ".bin"
+stale_after = "120s"
+minimum_size_bytes = 384
+
+[[checks]]
 name = "data-disk"
 type = "disk"
 mount = "/mnt/jt"
