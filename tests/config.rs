@@ -39,3 +39,20 @@ fn rejects_invalid_thresholds_and_progress_contract() {
     let bad_shm: Config = toml::from_str("[[checks]]\nname='x'\ntype='shm'\npath='/x'\nprobe='u64_counter'\nrequire_progress=true\nstale_after='1s'").unwrap();
     assert!(config::validate_config(&bad_shm).is_err());
 }
+
+#[test]
+fn validates_optional_runtime_ip() {
+    let valid_ip: Config = toml::from_str(&valid().replace(
+        "state_dir = \"/tmp/alertd\"",
+        "state_dir = \"/tmp/alertd\"\nip = \"52.221.32.231\"",
+    ))
+    .unwrap();
+    config::validate_config(&valid_ip).unwrap();
+
+    let invalid_ip: Config = toml::from_str(&valid().replace(
+        "state_dir = \"/tmp/alertd\"",
+        "state_dir = \"/tmp/alertd\"\nip = \"primary\"",
+    ))
+    .unwrap();
+    assert!(config::validate_config(&invalid_ip).is_err());
+}

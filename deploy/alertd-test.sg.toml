@@ -1,5 +1,6 @@
 [runtime]
 host = "sg-alertd-test"
+ip = "52.221.32.231"
 interval = "10s"
 state_dir = "/var/lib/alertd-test"
 log_level = "info"
@@ -76,4 +77,3 @@ name = "available-memory"
 type = "memory"
 warn_available_pct = 20
 critical_available_pct = 10
-

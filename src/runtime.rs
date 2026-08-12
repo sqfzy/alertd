@@ -43,7 +43,7 @@ pub struct RuntimeOptions {
 
 pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
     let mut config = config::load_config(&options.config_path)?;
-    let host = resolve_host(&config);
+    let initial_host = resolve_host(&config);
     let mut persistent = state::load(&config.runtime.state_dir)?;
     let queue = DeliveryQueue::open(&config.runtime.state_dir, config.delivery.queue_capacity)?;
     let dingtalk = if options.dry_run {
@@ -63,15 +63,20 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
         ..Default::default()
     };
     let mut observations = Vec::new();
-    info!(host, "alertd started");
+    info!(host = initial_host, "alertd started");
     while !stop.load(Ordering::Relaxed) {
         if reload.swap(false, Ordering::Relaxed) {
             reload_config(&options.config_path, &mut config, &mut persistent);
         }
+        let host = resolve_host(&config);
+        let report_context = report::ReportContext {
+            host: &host,
+            ip: config.runtime.ip.as_deref(),
+        };
         observations.clear();
         run_checks(
             &config,
-            &host,
+            report_context,
             &mut persistent,
             &mut context,
             &queue,
@@ -83,7 +88,7 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
             .clone_from(&context.journal_cursors);
         maybe_daily(
             &config,
-            &host,
+            report_context,
             &mut persistent,
             &queue,
             options.dry_run,
@@ -106,10 +111,12 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
 }
 
 pub fn send_test(config: &Config, dry_run: bool) -> Result<(), RuntimeError> {
-    let text = format!(
-        "🟢 OK · alertd 测试\n\n主机：{}\n状态：配置与钉钉投递正常",
-        resolve_host(config)
-    );
+    let host = resolve_host(config);
+    let mut text = format!("🟢 **OK · alertd 测试**\n\n**主机：** {host}");
+    if let Some(ip) = &config.runtime.ip {
+        text.push_str(&format!("\n\n**IP：** {ip}"));
+    }
+    text.push_str("\n\n**状态：** 配置与钉钉投递正常");
     if dry_run {
         println!("{text}");
     } else {
@@ -120,7 +127,7 @@ pub fn send_test(config: &Config, dry_run: bool) -> Result<(), RuntimeError> {
 
 fn run_checks(
     config: &Config,
-    host: &str,
+    report_context: report::ReportContext<'_>,
     persistent: &mut PersistentState,
     context: &mut CollectContext,
     queue: &DeliveryQueue,
@@ -136,7 +143,14 @@ fn run_checks(
     for check in config.checks.iter().filter(|check| check.enabled) {
         match collectors::collect(check, context) {
             Ok(observation) => {
-                resolve_collector_alarm(check, persistent, &global_policy, host, queue, dry_run);
+                resolve_collector_alarm(
+                    check,
+                    persistent,
+                    &global_policy,
+                    report_context,
+                    queue,
+                    dry_run,
+                );
                 let state = persistent.checks.entry(check.name.clone()).or_default();
                 state.collection_failures = 0;
                 let accepted = process_observation(
@@ -144,7 +158,7 @@ fn run_checks(
                     observation.clone(),
                     state,
                     &global_policy,
-                    host,
+                    report_context,
                     queue,
                     dry_run,
                 );
@@ -175,7 +189,7 @@ fn run_checks(
                     observation.clone(),
                     &mut collector_state,
                     &global_policy,
-                    host,
+                    report_context,
                     queue,
                     dry_run,
                 );
@@ -190,7 +204,7 @@ fn resolve_collector_alarm(
     check: &CheckConfig,
     persistent: &mut PersistentState,
     policy: &AlarmPolicy,
-    host: &str,
+    report_context: report::ReportContext<'_>,
     queue: &DeliveryQueue,
     dry_run: bool,
 ) {
@@ -199,7 +213,15 @@ fn resolve_collector_alarm(
         return;
     };
     let observation = Observation::healthy(&name, "监控采集恢复");
-    process_observation(check, observation, &mut state, policy, host, queue, dry_run);
+    process_observation(
+        check,
+        observation,
+        &mut state,
+        policy,
+        report_context,
+        queue,
+        dry_run,
+    );
     persistent.checks.insert(name, state);
 }
 
@@ -208,7 +230,7 @@ fn process_observation(
     observation: Observation,
     state: &mut CheckState,
     global: &AlarmPolicy,
-    host: &str,
+    report_context: report::ReportContext<'_>,
     queue: &DeliveryQueue,
     dry_run: bool,
 ) -> bool {
@@ -224,7 +246,7 @@ fn process_observation(
     let Some(event) = alarm::evaluate(state, &observation, &policy, check.runbook.clone()) else {
         return true;
     };
-    let text = report::format_alert(host, &event);
+    let text = report::format_alert(report_context, &event);
     let accepted = enqueue(queue, event.severity, text, dry_run);
     if !accepted {
         *state = previous;
@@ -305,7 +327,7 @@ fn sleep_worker(duration: Duration, stop: &AtomicBool) {
 
 fn maybe_daily(
     config: &Config,
-    host: &str,
+    report_context: report::ReportContext<'_>,
     persistent: &mut PersistentState,
     queue: &DeliveryQueue,
     dry_run: bool,
@@ -324,7 +346,7 @@ fn maybe_daily(
     if enqueue(
         queue,
         Severity::Ok,
-        report::format_daily(host, observations),
+        report::format_daily(report_context, observations),
         dry_run,
     ) {
         persistent.last_daily_date = Some(date);

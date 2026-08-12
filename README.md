@@ -26,6 +26,8 @@ alertd --config /etc/alertd/alertd.toml --send-test
 
 完整配置见 `config/alertd.toml.example`。未知字段、重复 check 名称和非法范围会被拒绝。钉钉密钥只从配置指定的环境变量读取；`/etc/alertd/alertd.env` 必须为 root 所有且权限 `0600`。
 
+`runtime.host` 表示机器的稳定角色名，`runtime.ip` 可选，表示值班人员用于识别或连接该实例的主 IP。IP 不自动探测，避免多网卡、NAT 或隧道环境选错地址。
+
 修改 TOML 后向进程发送 `SIGHUP`。新配置会先被完整解析和校验；失败时继续运行旧配置。
 
 ## Check 类型
@@ -48,11 +50,19 @@ alertd --config /etc/alertd/alertd.toml --send-test
 🔴 CRITICAL · 告警
 
 主机：bybit-sg
+
+IP：203.0.113.10
+
 检查：bybit-book
+
 状态：SHM 已 180 秒没有推进
-开始：2026-08-12 14:31:20
+
+异常开始：2026-08-12 14:31:20
+
 对象：/shm_bybit_lin_book_tick_v2
+
 进度：812945
+
 处理：https://runbook.example/shm-stale
 ```
 

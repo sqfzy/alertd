@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::{
     collections::HashSet,
     fs,
+    net::IpAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -80,6 +81,7 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub host: Option<String>,
+    pub ip: Option<String>,
     #[serde(default = "default_interval")]
     pub interval: String,
     #[serde(default = "default_state_dir")]
@@ -91,6 +93,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             host: None,
+            ip: None,
             interval: default_interval(),
             state_dir: default_state_dir(),
             log_level: default_log_level(),
@@ -294,6 +297,11 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
                 "runtime.host must contain 1..=128 printable bytes".into(),
             ));
         }
+    }
+    if let Some(ip) = &config.runtime.ip {
+        ip.parse::<IpAddr>().map_err(|_| {
+            ConfigError::Invalid("runtime.ip must be a valid IPv4 or IPv6 address".into())
+        })?;
     }
     if !config.runtime.state_dir.is_absolute() {
         return Err(ConfigError::Invalid(

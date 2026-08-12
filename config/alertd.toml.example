@@ -1,5 +1,6 @@
 [runtime]
 # host = "bybit-sg" # 省略时读取 hostname
+# ip = "203.0.113.10" # 可选；填写值班人员可直接连接或识别的主地址
 interval = "30s"
 state_dir = "/var/lib/alertd"
 log_level = "info"
