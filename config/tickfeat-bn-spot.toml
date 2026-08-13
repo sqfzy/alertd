@@ -25,7 +25,6 @@ at_all_on_critical = false
 name = "tickfeat-units"
 type = "systemd"
 units = [
-  "tickfeat-bn-spot-book-tick.service",
   "tickfeat-live-bn-spot.service",
   "tickfeat-factor-shm.service",
   "tickfeat-factor-archive.timer",
@@ -44,21 +43,15 @@ cmdline_contains = "bn_read_booktick_raw_dpdk_ens7_colo_mm/zt_bn_read_booktick_r
 min_count = 2
 
 [[checks]]
-name = "bn-spot-book-publisher"
+name = "bn-spot-legacy-factors"
 type = "process"
-cmdline_contains = "tickfeat_book_tick_board_publish /shm_bn_spot_book_tick_ring_v2 /shm_bn_spot_book_tick_v2"
+cmdline_contains = "/shm_bn_spot_depth_level_v2 /shm_bn_spot_trade_v2 /shm_bn_swap_book_tick_v2 - /shm_tickfeat_factor_bn_spot_bn_swap --factors-category-off factor_main,funding"
 min_count = 1
 
 [[checks]]
-name = "bn-spot-mean-v2"
-type = "process"
-cmdline_contains = "--primary-book /shm_bn_spot_book_tick_v2 --only-factors legacy.mean_v2"
-min_count = 1
-
-[[checks]]
-name = "bn-spot-book-ring"
+name = "bn-spot-depth-board"
 type = "shm"
-path = "/shm_bn_spot_book_tick_ring_v2"
+path = "/shm_bn_spot_depth_level_v2"
 probe = "gconf_v2"
 magic = 1195591218
 layout_version = 2
@@ -66,9 +59,9 @@ require_progress = true
 stale_after = "60s"
 
 [[checks]]
-name = "bn-spot-book-board"
+name = "bn-spot-trade-ring"
 type = "shm"
-path = "/shm_bn_spot_book_tick_v2"
+path = "/shm_bn_spot_trade_v2"
 probe = "gconf_v2"
 magic = 1195591218
 layout_version = 2
@@ -86,7 +79,7 @@ require_progress = true
 stale_after = "60s"
 
 [[checks]]
-name = "mean-v2-factor-board"
+name = "bn-spot-legacy-factor-board"
 type = "shm"
 path = "/shm_tickfeat_factor_bn_spot_bn_swap"
 probe = "gconf_v2"
@@ -96,7 +89,7 @@ require_progress = true
 stale_after = "90s"
 
 [[checks]]
-name = "mean-v2-raw"
+name = "bn-spot-legacy-raw"
 type = "latest_file"
 directory = "/var/lib/tickfeat/instances/bn-spot-bn-swap/raw"
 prefix = "tickfeat_raw_"
@@ -105,7 +98,7 @@ stale_after = "120s"
 minimum_size_bytes = 384
 
 [[checks]]
-name = "mean-v2-jsonl"
+name = "bn-spot-legacy-jsonl"
 type = "latest_file"
 directory = "/var/lib/tickfeat/instances/bn-spot-bn-swap/factors"
 prefix = "online_factor"
@@ -118,7 +111,6 @@ name = "tickfeat-journal"
 type = "journal"
 units = [
   "tickfeat-live-bn-spot.service",
-  "tickfeat-bn-spot-book-tick.service",
   "tickfeat-factor-archive.service",
 ]
 rules = [

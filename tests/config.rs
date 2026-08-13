@@ -92,5 +92,5 @@ minimum_size_bytes = 384
 #[test]
 fn accepts_tickfeat_production_config() {
     let config = config::load_config(std::path::Path::new("config/tickfeat-bn-spot.toml")).unwrap();
-    assert_eq!(config.checks.len(), 15);
+    assert_eq!(config.checks.len(), 14);
 }
