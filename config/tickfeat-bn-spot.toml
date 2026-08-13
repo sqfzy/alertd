@@ -31,7 +31,7 @@ units = [
 ]
 
 [[checks]]
-name = "bn-spot-book-writer"
+name = "bn-spot-market-writer"
 type = "process"
 cmdline_contains = "bn_read_all_market_dpdk_ens7_colo_mm/zt_bn_read_all_market_dpdk_ens7_colo_mm 2"
 min_count = 1
