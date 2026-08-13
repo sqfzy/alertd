@@ -1,7 +1,8 @@
 use super::CollectError;
-use crate::{config::CheckConfig, model::Observation};
 #[cfg(target_os = "linux")]
-use std::process::Command;
+use super::command;
+use crate::{config::CheckConfig, model::Observation};
+use std::time::Duration;
 
 #[derive(Debug, PartialEq, Eq)]
 struct UnitState {
@@ -48,12 +49,11 @@ fn parse_states(text: &str) -> Result<Vec<UnitState>, CollectError> {
 }
 
 #[cfg(target_os = "linux")]
-fn read_states(units: &[String]) -> Result<Vec<UnitState>, CollectError> {
-    let output = Command::new("systemctl")
-        .arg("show")
-        .args(units)
-        .args(["--property=Id,LoadState,ActiveState,SubState"])
-        .output()?;
+fn read_states(units: &[String], timeout: Duration) -> Result<Vec<UnitState>, CollectError> {
+    let mut arguments = vec!["show"];
+    arguments.extend(units.iter().map(String::as_str));
+    arguments.push("--property=Id,LoadState,ActiveState,SubState");
+    let output = command::run("systemctl", &arguments, timeout)?;
     if !output.status.success() {
         return Err(CollectError::Invalid(format!(
             "systemctl show exited {}",
@@ -64,12 +64,16 @@ fn read_states(units: &[String]) -> Result<Vec<UnitState>, CollectError> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn read_states(_units: &[String]) -> Result<Vec<UnitState>, CollectError> {
+fn read_states(_units: &[String], _timeout: Duration) -> Result<Vec<UnitState>, CollectError> {
     Err(CollectError::Unsupported("systemd requires Linux".into()))
 }
 
-pub fn collect(check: &CheckConfig, units: &[String]) -> Result<Observation, CollectError> {
-    let states = read_states(units)?;
+pub fn collect(
+    check: &CheckConfig,
+    units: &[String],
+    timeout: Duration,
+) -> Result<Observation, CollectError> {
+    let states = read_states(units, timeout)?;
     if states.len() != units.len() {
         return Err(CollectError::Invalid(format!(
             "systemctl returned {}/{} units",

@@ -2,11 +2,13 @@
 host = "sg-alertd-test"
 ip = "52.221.32.231"
 interval = "10s"
-state_dir = "/var/lib/alertd-test"
+state_dir = "/var/lib/alertd"
 log_level = "info"
+command_timeout = "3s"
 
 [alarm]
 pending_for = "10s"
+recover_for = "10s"
 warn_repeat = "1m"
 critical_repeat = "1m"
 daily_report_at = "off"
@@ -20,17 +22,19 @@ queue_capacity = 128
 retry_initial = "5s"
 retry_max = "1m"
 at_all_on_critical = false
+queue_warn_pct = 80
+failure_report_after = 3
 
 [[checks]]
 name = "alertd-process"
 type = "process"
-cmdline_contains = "/opt/alertd-test/alertd"
+cmdline_contains = "/opt/alertd-test/current/alertd"
 min_count = 1
 
 [[checks]]
-name = "test-probe-process"
+name = "wsping-monitor"
 type = "process"
-cmdline_contains = "alertd-test-probe-marker"
+cmdline_contains = "/home/ec2-user/wsping_monitor.py"
 min_count = 1
 
 [[checks]]
@@ -40,19 +44,40 @@ path = "/shm_bybit_lin_book_tick_v2"
 probe = "exists"
 
 [[checks]]
-name = "alertd-test-counter"
-type = "shm"
-path = "/alertd_test_counter"
-probe = "u64_counter"
-require_progress = true
-stale_after = "20s"
-offset = 0
-endian = "little"
+name = "host-services"
+type = "systemd"
+units = ["winner-mounts.service", "wsping-monitor.service"]
 
 [[checks]]
-name = "alertd-test-journal"
+name = "business-journal"
 type = "journal"
-units = ["alertd-journal-fixture.service"]
+units = [
+  "bybit-book-shm-creator.service",
+  "bybit-bridge.service",
+  "bybit-dedup-creator.service",
+  "bybit-depth-shm-creator.service",
+  "bybit-dns.service",
+  "bybit-dpdk-host-setup.service",
+  "bybit-dpdk-primary.service",
+  "bybit-event-shm-creator.service",
+  "bybit-ftn-consumer.service",
+  "bybit-lat-consumer.service",
+  "bybit-lat-precise.service",
+  "bybit-market-dump-archive.service",
+  "bybit-perp-order.service",
+  "bybit-perp-read.service",
+  "bybit-perp-sg-deploy.service",
+  "bybit-probe-shm-creator.service",
+  "bybit-request-shm-creator.service",
+  "bybit-rx-tuning-fatal-collector.service",
+  "bybit-rx-tuning-primary.service",
+  "bybit-rx-tuning-reader.service",
+  "bybit-syminfo.service",
+  "bybit-trade-shm-creator.service",
+  "bybit-trig-shm-creator.service",
+  "winner-mounts.service",
+  "wsping-monitor.service",
+]
 rules = [
   { contains = "ALERTD_TEST_WARN", severity = "warn" },
   { contains = "ALERTD_TEST_ERROR", severity = "critical" },
@@ -62,18 +87,48 @@ rules = [
 name = "root-disk"
 type = "disk"
 mount = "/"
-warn_used_pct = 80
-critical_used_pct = 90
+warn_used_pct = 95
+critical_used_pct = 99
+warn_inode_used_pct = 95
+critical_inode_used_pct = 99
 
 [[checks]]
 name = "data-disk"
 type = "disk"
 mount = "/mnt/jt"
-warn_used_pct = 80
-critical_used_pct = 90
+warn_used_pct = 95
+critical_used_pct = 99
+warn_inode_used_pct = 95
+critical_inode_used_pct = 99
 
 [[checks]]
 name = "available-memory"
 type = "memory"
 warn_available_pct = 20
 critical_available_pct = 10
+
+[[checks]]
+name = "per-cpu"
+type = "cpu"
+warn_usage_pct = 80
+critical_usage_pct = 95
+
+[[checks]]
+name = "clock"
+type = "time_sync"
+warn_offset = "1ms"
+critical_offset = "5ms"
+
+[[checks]]
+name = "network"
+type = "network"
+interfaces = ["ens5", "ens7"]
+warn_errors_per_second = 1
+critical_errors_per_second = 10
+warn_drops_per_second = 100
+critical_drops_per_second = 1000
+
+[[checks]]
+name = "latency-baseline"
+type = "system_tuning"
+enabled = false

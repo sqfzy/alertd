@@ -18,8 +18,14 @@ fn default_state_dir() -> PathBuf {
 fn default_log_level() -> String {
     "info".into()
 }
+fn default_command_timeout() -> String {
+    "3s".into()
+}
 fn default_pending() -> String {
     "90s".into()
+}
+fn default_recover() -> String {
+    "60s".into()
 }
 fn default_warn_repeat() -> String {
     "30m".into()
@@ -41,6 +47,12 @@ fn default_timeout() -> String {
 }
 fn default_capacity() -> usize {
     1024
+}
+fn default_queue_warn_pct() -> u8 {
+    80
+}
+fn default_failure_report_after() -> u32 {
+    3
 }
 fn default_retry_initial() -> String {
     "5s".into()
@@ -66,8 +78,14 @@ fn default_collect_failures() -> u32 {
 fn default_minimum_size_bytes() -> u64 {
     1
 }
+fn default_warn_inode_used_pct() -> f64 {
+    80.0
+}
+fn default_critical_inode_used_pct() -> f64 {
+    90.0
+}
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -80,7 +98,7 @@ pub struct Config {
     pub checks: Vec<CheckConfig>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub host: Option<String>,
@@ -91,6 +109,8 @@ pub struct RuntimeConfig {
     pub state_dir: PathBuf,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default = "default_command_timeout")]
+    pub command_timeout: String,
 }
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -100,15 +120,18 @@ impl Default for RuntimeConfig {
             interval: default_interval(),
             state_dir: default_state_dir(),
             log_level: default_log_level(),
+            command_timeout: default_command_timeout(),
         }
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AlarmConfig {
     #[serde(default = "default_pending")]
     pub pending_for: String,
+    #[serde(default = "default_recover")]
+    pub recover_for: String,
     #[serde(default = "default_warn_repeat")]
     pub warn_repeat: String,
     #[serde(default = "default_critical_repeat")]
@@ -122,6 +145,7 @@ impl Default for AlarmConfig {
     fn default() -> Self {
         Self {
             pending_for: default_pending(),
+            recover_for: default_recover(),
             warn_repeat: default_warn_repeat(),
             critical_repeat: default_critical_repeat(),
             daily_report_at: default_daily(),
@@ -130,7 +154,7 @@ impl Default for AlarmConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeliveryConfig {
     #[serde(default = "default_token_env")]
@@ -141,6 +165,10 @@ pub struct DeliveryConfig {
     pub timeout: String,
     #[serde(default = "default_capacity")]
     pub queue_capacity: usize,
+    #[serde(default = "default_queue_warn_pct")]
+    pub queue_warn_pct: u8,
+    #[serde(default = "default_failure_report_after")]
+    pub failure_report_after: u32,
     #[serde(default = "default_retry_initial")]
     pub retry_initial: String,
     #[serde(default = "default_retry_max")]
@@ -154,6 +182,8 @@ impl Default for DeliveryConfig {
             secret_env: default_secret_env(),
             timeout: default_timeout(),
             queue_capacity: default_capacity(),
+            queue_warn_pct: default_queue_warn_pct(),
+            failure_report_after: default_failure_report_after(),
             retry_initial: default_retry_initial(),
             retry_max: default_retry_max(),
             at_all_on_critical: false,
@@ -161,7 +191,7 @@ impl Default for DeliveryConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CheckKind {
     Process {
@@ -201,14 +231,34 @@ pub enum CheckKind {
         mount: PathBuf,
         warn_used_pct: f64,
         critical_used_pct: f64,
+        #[serde(default = "default_warn_inode_used_pct")]
+        warn_inode_used_pct: f64,
+        #[serde(default = "default_critical_inode_used_pct")]
+        critical_inode_used_pct: f64,
     },
     Memory {
         warn_available_pct: f64,
         critical_available_pct: f64,
     },
+    Cpu {
+        warn_usage_pct: f64,
+        critical_usage_pct: f64,
+    },
+    TimeSync {
+        warn_offset: String,
+        critical_offset: String,
+    },
+    Network {
+        interfaces: Vec<String>,
+        warn_errors_per_second: f64,
+        critical_errors_per_second: f64,
+        warn_drops_per_second: f64,
+        critical_drops_per_second: f64,
+    },
+    SystemTuning,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct CheckConfig {
     pub name: String,
     #[serde(default = "default_true")]
@@ -216,6 +266,7 @@ pub struct CheckConfig {
     #[serde(default = "default_severity")]
     pub severity: Severity,
     pub pending_for: Option<String>,
+    pub recover_for: Option<String>,
     pub runbook: Option<String>,
     #[serde(flatten)]
     pub kind: CheckKind,
@@ -236,7 +287,7 @@ pub enum Endian {
     Big,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct JournalRule {
     pub contains: String,
@@ -306,6 +357,12 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
         Duration::from_secs(5),
         Duration::from_secs(3600),
     )?;
+    duration_range(
+        "runtime.command_timeout",
+        &config.runtime.command_timeout,
+        Duration::from_millis(200),
+        Duration::from_secs(30),
+    )?;
     if let Some(host) = &config.runtime.host {
         if host.is_empty() || host.len() > 128 || host.chars().any(char::is_control) {
             return Err(ConfigError::Invalid(
@@ -334,6 +391,12 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     duration_range(
         "alarm.pending_for",
         &config.alarm.pending_for,
+        Duration::ZERO,
+        Duration::from_secs(86400),
+    )?;
+    duration_range(
+        "alarm.recover_for",
+        &config.alarm.recover_for,
         Duration::ZERO,
         Duration::from_secs(86400),
     )?;
@@ -380,6 +443,16 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
             "delivery.queue_capacity outside 16..=65536".into(),
         ));
     }
+    if !(50..=95).contains(&config.delivery.queue_warn_pct) {
+        return Err(ConfigError::Invalid(
+            "delivery.queue_warn_pct outside 50..=95".into(),
+        ));
+    }
+    if !(1..=100).contains(&config.delivery.failure_report_after) {
+        return Err(ConfigError::Invalid(
+            "delivery.failure_report_after outside 1..=100".into(),
+        ));
+    }
     let mut names = HashSet::new();
     for check in &config.checks {
         if check.name.is_empty() || check.name.len() > 128 || !names.insert(&check.name) {
@@ -397,6 +470,14 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
         if let Some(value) = &check.pending_for {
             duration_range(
                 "checks.pending_for",
+                value,
+                Duration::ZERO,
+                Duration::from_secs(86400),
+            )?;
+        }
+        if let Some(value) = &check.recover_for {
+            duration_range(
+                "checks.recover_for",
                 value,
                 Duration::ZERO,
                 Duration::from_secs(86400),
@@ -545,10 +626,11 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
             mount,
             warn_used_pct,
             critical_used_pct,
+            warn_inode_used_pct,
+            critical_inode_used_pct,
         } if !mount.is_absolute()
-            || !(*warn_used_pct > 0.0
-                && warn_used_pct < critical_used_pct
-                && *critical_used_pct <= 100.0) =>
+            || !valid_upper_thresholds(*warn_used_pct, *critical_used_pct)
+            || !valid_upper_thresholds(*warn_inode_used_pct, *critical_inode_used_pct) =>
         {
             Err(ConfigError::Invalid(format!(
                 "check {} has invalid disk config",
@@ -567,8 +649,67 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
                 check.name
             )))
         }
+        CheckKind::Cpu {
+            warn_usage_pct,
+            critical_usage_pct,
+        } if !valid_upper_thresholds(*warn_usage_pct, *critical_usage_pct) => Err(
+            ConfigError::Invalid(format!("check {} has invalid CPU thresholds", check.name)),
+        ),
+        CheckKind::TimeSync {
+            warn_offset,
+            critical_offset,
+        } => {
+            let warn = duration_range(
+                "checks.time_sync.warn_offset",
+                warn_offset,
+                Duration::from_millis(1),
+                Duration::from_secs(1),
+            )?;
+            duration_range(
+                "checks.time_sync.critical_offset",
+                critical_offset,
+                warn + Duration::from_millis(1),
+                Duration::from_secs(1),
+            )?;
+            Ok(())
+        }
+        CheckKind::Network {
+            interfaces,
+            warn_errors_per_second,
+            critical_errors_per_second,
+            warn_drops_per_second,
+            critical_drops_per_second,
+        } => {
+            let unique: HashSet<_> = interfaces.iter().collect();
+            if interfaces.is_empty()
+                || interfaces.len() > 64
+                || unique.len() != interfaces.len()
+                || interfaces.iter().any(|name| {
+                    name.is_empty()
+                        || name.len() > 15
+                        || name.contains('/')
+                        || name.chars().any(char::is_whitespace)
+                })
+                || !valid_rate_thresholds(*warn_errors_per_second, *critical_errors_per_second)
+                || !valid_rate_thresholds(*warn_drops_per_second, *critical_drops_per_second)
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "check {} has invalid network interfaces or thresholds",
+                    check.name
+                )));
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
+}
+
+fn valid_upper_thresholds(warn: f64, critical: f64) -> bool {
+    warn.is_finite() && critical.is_finite() && warn > 0.0 && warn < critical && critical <= 100.0
+}
+
+fn valid_rate_thresholds(warn: f64, critical: f64) -> bool {
+    warn.is_finite() && critical.is_finite() && warn >= 0.0 && warn < critical
 }
 
 pub fn resolve_dingtalk_credentials(

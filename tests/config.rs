@@ -94,3 +94,60 @@ fn accepts_tickfeat_production_config() {
     let config = config::load_config(std::path::Path::new("config/tickfeat-bn-spot.toml")).unwrap();
     assert_eq!(config.checks.len(), 14);
 }
+
+#[test]
+fn validates_host_health_checks_and_new_global_ranges() {
+    let text = r#"
+[runtime]
+command_timeout = "3s"
+
+[alarm]
+recover_for = "60s"
+
+[delivery]
+queue_warn_pct = 80
+failure_report_after = 3
+
+[[checks]]
+name = "cpu"
+type = "cpu"
+warn_usage_pct = 80
+critical_usage_pct = 95
+
+[[checks]]
+name = "clock"
+type = "time_sync"
+warn_offset = "1ms"
+critical_offset = "5ms"
+
+[[checks]]
+name = "network"
+type = "network"
+interfaces = ["ens5", "ens7"]
+warn_errors_per_second = 1
+critical_errors_per_second = 10
+warn_drops_per_second = 100
+critical_drops_per_second = 1000
+
+[[checks]]
+name = "tuning"
+type = "system_tuning"
+"#;
+    let config: Config = toml::from_str(text).unwrap();
+    config::validate_config(&config).unwrap();
+
+    let bad_cpu: Config =
+        toml::from_str(&text.replace("critical_usage_pct = 95", "critical_usage_pct = 70"))
+            .unwrap();
+    assert!(config::validate_config(&bad_cpu).is_err());
+    let duplicate_interface: Config = toml::from_str(&text.replace(
+        "interfaces = [\"ens5\", \"ens7\"]",
+        "interfaces = [\"ens5\", \"ens5\"]",
+    ))
+    .unwrap();
+    assert!(config::validate_config(&duplicate_interface).is_err());
+    let bad_offset: Config =
+        toml::from_str(&text.replace("critical_offset = \"5ms\"", "critical_offset = \"1ms\""))
+            .unwrap();
+    assert!(config::validate_config(&bad_offset).is_err());
+}

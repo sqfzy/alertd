@@ -1,5 +1,9 @@
-use crate::model::{AlertEvent, Observation, ObservationStatus, Severity, Transition};
+use crate::{
+    config::{CheckConfig, CheckKind},
+    model::{AlertEvent, CheckState, Observation, ObservationStatus, Severity, Transition},
+};
 use chrono::Local;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ReportContext<'a> {
@@ -12,6 +16,7 @@ pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
         Transition::Firing => (severity_icon(event.severity), "告警"),
         Transition::Repeating => (severity_icon(event.severity), "持续"),
         Transition::Resolved => ("🟢", "恢复"),
+        Transition::Event => (severity_icon(event.severity), "事件"),
     };
     let mut text = format!("{icon} **{} · {transition}**", event.severity.label());
     push_field(&mut text, "主机", context.host);
@@ -20,9 +25,14 @@ pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
     }
     push_field(&mut text, "检查", &event.check_name);
     push_field(&mut text, "状态", &event.summary);
+    let time_label = if event.transition == Transition::Event {
+        "发生时间"
+    } else {
+        "异常开始"
+    };
     push_field(
         &mut text,
-        "异常开始",
+        time_label,
         &event
             .started_at
             .with_timezone(&Local)
@@ -56,30 +66,121 @@ pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
     text
 }
 
-pub fn format_daily(context: ReportContext<'_>, observations: &[Observation]) -> String {
-    let mut healthy = 0;
-    let mut unhealthy = Vec::new();
-    for observation in observations {
-        match observation.status {
-            ObservationStatus::Healthy => healthy += 1,
-            ObservationStatus::Unhealthy(_) => unhealthy.push(format!(
-                "{}: {}",
-                observation.check_name, observation.summary
-            )),
-        }
-    }
+pub fn format_daily(
+    context: ReportContext<'_>,
+    checks: &[CheckConfig],
+    observations: &[Observation],
+    states: &HashMap<String, CheckState>,
+    queue_pending: usize,
+) -> String {
     let mut text = "📋 **DAILY**".to_string();
     push_field(&mut text, "主机", context.host);
     if let Some(ip) = context.ip {
         push_field(&mut text, "IP", ip);
     }
-    push_field(&mut text, "检查", &observations.len().to_string());
-    push_field(&mut text, "正常", &healthy.to_string());
-    push_field(&mut text, "异常", &unhealthy.len().to_string());
-    for item in unhealthy {
-        text.push_str(&format!("\n\n- {item}"));
+    let mut current: Vec<_> = states
+        .iter()
+        .filter(|(_, state)| state.firing_since.is_some())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    current.sort_unstable();
+    push_field(
+        &mut text,
+        "当前异常",
+        &if current.is_empty() {
+            "无".into()
+        } else {
+            current.join(", ")
+        },
+    );
+
+    let mut resources = Vec::new();
+    let mut cpu_rows = None;
+    let mut applications = (0, 0);
+    let mut data_chain = (0, 0);
+    let mut platform = Vec::new();
+    let mut journal_warn = 0_u64;
+    let mut journal_critical = 0_u64;
+    for check in checks.iter().filter(|check| check.enabled) {
+        let observation = observations
+            .iter()
+            .find(|item| item.check_name == check.name);
+        match &check.kind {
+            CheckKind::Cpu { .. } | CheckKind::Memory { .. } | CheckKind::Disk { .. } => {
+                if let Some(item) = observation {
+                    resources.push(format!("{}: {}", check.name, item.summary));
+                    if matches!(check.kind, CheckKind::Cpu { .. }) {
+                        cpu_rows = item.details.get("每核").cloned();
+                    }
+                }
+            }
+            CheckKind::Process { .. } | CheckKind::Systemd { .. } => {
+                applications.1 += 1;
+                applications.0 += usize::from(observation.is_some_and(is_healthy));
+            }
+            CheckKind::Shm { .. } | CheckKind::LatestFile { .. } => {
+                data_chain.1 += 1;
+                data_chain.0 += usize::from(observation.is_some_and(is_healthy));
+            }
+            CheckKind::Journal { .. } => {
+                if let Some(state) = states.get(&check.name) {
+                    journal_warn = journal_warn.saturating_add(state.daily_warn_count);
+                    journal_critical = journal_critical.saturating_add(state.daily_critical_count);
+                }
+            }
+            CheckKind::TimeSync { .. } | CheckKind::Network { .. } | CheckKind::SystemTuning => {
+                if let Some(item) = observation {
+                    platform.push(format!("{}: {}", check.name, item.summary));
+                }
+            }
+        }
     }
+    push_field(&mut text, "主机资源", &resources.join("\n"));
+    if let Some(rows) = cpu_rows {
+        push_field(&mut text, "每核 CPU", &rows);
+    }
+    push_field(
+        &mut text,
+        "进程/systemd",
+        &format!("{}/{} 正常", applications.0, applications.1),
+    );
+    push_field(
+        &mut text,
+        "SHM/文件链路",
+        &format!("{}/{} 正常", data_chain.0, data_chain.1),
+    );
+    push_field(
+        &mut text,
+        "日志 24h",
+        &format!("WARN {journal_warn}，ERROR {journal_critical}"),
+    );
+    push_field(&mut text, "时钟/调优/网络", &platform.join("\n"));
+    push_field(&mut text, "投递队列", &queue_pending.to_string());
     text
+}
+
+pub fn format_internal(
+    context: ReportContext<'_>,
+    severity: Severity,
+    title: &str,
+    detail: &str,
+) -> String {
+    let mut text = format!(
+        "{} **{} · alertd 自监控**",
+        severity_icon(severity),
+        severity.label()
+    );
+    push_field(&mut text, "主机", context.host);
+    if let Some(ip) = context.ip {
+        push_field(&mut text, "IP", ip);
+    }
+    push_field(&mut text, "状态", title);
+    push_field(&mut text, "详情", detail);
+    text
+}
+
+fn is_healthy(observation: &Observation) -> bool {
+    matches!(observation.status, ObservationStatus::Healthy)
 }
 
 fn push_field(text: &mut String, label: &str, value: &str) {

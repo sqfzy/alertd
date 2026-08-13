@@ -4,7 +4,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=90s
 ExecStart=/usr/local/bin/alertd --config /etc/alertd/alertd.toml
 EnvironmentFile=/etc/alertd/alertd.env
 StateDirectory=alertd

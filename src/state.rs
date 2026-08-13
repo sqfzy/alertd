@@ -15,6 +15,8 @@ pub struct PersistentState {
     #[serde(default)]
     pub journal_cursors: HashMap<String, String>,
     pub last_daily_date: Option<String>,
+    #[serde(default)]
+    pub clean_shutdown: Option<bool>,
 }
 
 #[derive(Debug, Error)]
@@ -51,4 +53,18 @@ pub fn save(root: &Path, state: &PersistentState) -> Result<(), StateError> {
     fs::rename(&temporary, path(root))?;
     File::open(root)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PersistentState;
+
+    #[test]
+    fn old_state_without_clean_shutdown_remains_unknown() {
+        let state: PersistentState =
+            serde_json::from_str(r#"{"checks":{},"journal_cursors":{},"last_daily_date":null}"#)
+                .expect("old state remains compatible");
+
+        assert_eq!(state.clean_shutdown, None);
+    }
 }

@@ -24,6 +24,8 @@ pub enum QueueError {
     Json(#[from] serde_json::Error),
     #[error("delivery queue is full ({0})")]
     Full(usize),
+    #[error("corrupt queue message moved to quarantine: {0}")]
+    Quarantined(PathBuf),
 }
 
 #[derive(Clone, Debug)]
@@ -40,7 +42,20 @@ impl DeliveryQueue {
     }
 
     pub fn enqueue(&self, severity: Severity, text: String) -> Result<String, QueueError> {
-        if self.pending_paths()?.len() >= self.capacity {
+        self.enqueue_with_limit(severity, text, self.capacity.saturating_sub(1))
+    }
+
+    pub fn enqueue_internal(&self, severity: Severity, text: String) -> Result<String, QueueError> {
+        self.enqueue_with_limit(severity, text, self.capacity)
+    }
+
+    fn enqueue_with_limit(
+        &self,
+        severity: Severity,
+        text: String,
+        limit: usize,
+    ) -> Result<String, QueueError> {
+        if self.pending_paths()?.len() >= limit {
             return Err(QueueError::Full(self.capacity));
         }
         let id = format!(
@@ -75,8 +90,10 @@ impl DeliveryQueue {
             Ok(message) => Ok(Some((path, message))),
             Err(error) => {
                 let target = self.root.join("quarantine").join(path.file_name().unwrap());
-                fs::rename(&path, target)?;
-                Err(QueueError::Json(error))
+                fs::rename(&path, &target)?;
+                sync_dir(&self.root)?;
+                let _ = error;
+                Err(QueueError::Quarantined(target))
             }
         }
     }
@@ -117,5 +134,30 @@ mod tests {
         assert_eq!(message.text, "one");
         queue.acknowledge(&path).unwrap();
         assert_eq!(queue.pending_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn reserves_final_slot_for_internal_alerts() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = DeliveryQueue::open(temp.path(), 2).unwrap();
+        queue.enqueue(Severity::Warn, "business".into()).unwrap();
+        assert!(matches!(
+            queue.enqueue(Severity::Warn, "rejected".into()),
+            Err(QueueError::Full(2))
+        ));
+        queue
+            .enqueue_internal(Severity::Warn, "internal".into())
+            .unwrap();
+        assert_eq!(queue.pending_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn quarantines_corrupt_messages() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = DeliveryQueue::open(temp.path(), 16).unwrap();
+        fs::write(temp.path().join("spool/000.json"), b"not json").unwrap();
+        let result = queue.oldest();
+        assert!(matches!(result, Err(QueueError::Quarantined(_))));
+        assert!(temp.path().join("spool/quarantine/000.json").exists());
     }
 }

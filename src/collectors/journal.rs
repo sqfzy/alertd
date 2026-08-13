@@ -1,10 +1,11 @@
+#[cfg(target_os = "linux")]
+use super::command;
 use super::{CollectContext, CollectError};
 use crate::{
     config::{CheckConfig, JournalRule},
     model::{Observation, Severity},
 };
-#[cfg(target_os = "linux")]
-use std::process::Command;
+use std::time::Duration;
 
 #[derive(Debug)]
 struct JournalBatch {
@@ -12,32 +13,70 @@ struct JournalBatch {
     messages: Vec<String>,
 }
 
-fn read_batch(units: &[String], cursor: Option<&str>) -> Result<JournalBatch, CollectError> {
+#[derive(Debug, Default, PartialEq, Eq)]
+struct JournalMatches {
+    severity: Severity,
+    hits: u64,
+    warn_hits: u64,
+    critical_hits: u64,
+    sample: String,
+}
+
+fn match_messages(messages: &[String], rules: &[JournalRule]) -> JournalMatches {
+    let mut matches = JournalMatches::default();
+    for message in messages {
+        for rule in rules {
+            if message.contains(&rule.contains) {
+                matches.hits += 1;
+                matches.severity = matches.severity.max(rule.severity);
+                match rule.severity {
+                    Severity::Warn => matches.warn_hits += 1,
+                    Severity::Critical => matches.critical_hits += 1,
+                    Severity::Ok => {}
+                }
+                if matches.sample.is_empty() {
+                    matches.sample = message.chars().take(240).collect();
+                }
+            }
+        }
+    }
+    matches
+}
+
+fn read_batch(
+    units: &[String],
+    cursor: Option<&str>,
+    timeout: Duration,
+) -> Result<JournalBatch, CollectError> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (units, cursor);
+        let _ = (units, cursor, timeout);
         Err(CollectError::Unsupported("journald requires Linux".into()))
     }
     #[cfg(target_os = "linux")]
     {
-        let mut command = Command::new("journalctl");
-        command.args(["--no-pager", "--quiet", "--output=json", "--show-cursor"]);
+        let mut arguments = vec!["--no-pager", "--quiet", "--output=json", "--show-cursor"];
         for unit in units {
-            command.arg("--unit").arg(unit);
+            arguments.push("--unit");
+            arguments.push(unit);
         }
         if let Some(value) = cursor {
-            command.arg("--after-cursor").arg(value);
+            arguments.push("--after-cursor");
+            arguments.push(value);
         } else {
-            command.arg("--since").arg("now");
+            arguments.push("--since");
+            arguments.push("now");
         }
-        let output = command.output()?;
+        let output = command::run("journalctl", &arguments, timeout)?;
         if !output.status.success() {
             if output.status.code() == Some(1)
                 && output.stdout.is_empty()
                 && output.stderr.is_empty()
             {
                 return Ok(JournalBatch {
-                    cursor: cursor.map(str::to_owned).or_else(current_cursor),
+                    cursor: cursor
+                        .map(str::to_owned)
+                        .or_else(|| current_cursor(timeout)),
                     messages: Vec::new(),
                 });
             }
@@ -75,47 +114,70 @@ pub fn collect(
     let batch = read_batch(
         units,
         context.journal_cursors.get(&check.name).map(String::as_str),
+        context.command_timeout,
     )?;
-    let mut severity = Severity::Ok;
-    let mut hits = 0;
-    let mut sample = String::new();
-    for message in &batch.messages {
-        for rule in rules {
-            if message.contains(&rule.contains) {
-                hits += 1;
-                severity = severity.max(rule.severity);
-                if sample.is_empty() {
-                    sample = message.chars().take(240).collect();
-                }
-            }
-        }
-    }
+    let matches = match_messages(&batch.messages, rules);
     if let Some(cursor) = batch.cursor {
         context
             .pending_journal_cursors
             .insert(check.name.clone(), cursor);
     }
-    let summary = format!("journal 新增 {} 行，命中 {hits} 条", batch.messages.len());
-    let observation = if hits == 0 {
+    let summary = format!(
+        "journal 新增 {} 行，命中 {} 条",
+        batch.messages.len(),
+        matches.hits
+    );
+    let observation = if matches.hits == 0 {
         Observation::healthy(&check.name, summary)
     } else {
-        Observation::unhealthy(&check.name, severity, summary)
+        Observation::unhealthy(&check.name, matches.severity, summary)
     };
     Ok(observation
+        .event_counts(matches.warn_hits, matches.critical_hits)
         .detail("units", units.join(", "))
-        .detail("样例", sample))
+        .detail("本次命中", matches.hits.to_string())
+        .detail("样例", matches.sample))
 }
 
 #[cfg(target_os = "linux")]
-fn current_cursor() -> Option<String> {
-    let output = Command::new("journalctl")
-        .args(["--no-pager", "--quiet", "--show-cursor", "--lines=0"])
-        .output()
-        .ok()?;
+fn current_cursor(timeout: Duration) -> Option<String> {
+    let output = command::run(
+        "journalctl",
+        &["--no-pager", "--quiet", "--show-cursor", "--lines=0"],
+        timeout,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .find_map(|line| line.strip_prefix("-- cursor: ").map(str::to_owned))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_warn_and_critical_substrings() {
+        let rules = vec![
+            JournalRule {
+                contains: "WARN".into(),
+                severity: Severity::Warn,
+            },
+            JournalRule {
+                contains: "ERROR".into(),
+                severity: Severity::Critical,
+            },
+        ];
+        let matches = match_messages(
+            &["WARN first".into(), "normal".into(), "ERROR failed".into()],
+            &rules,
+        );
+        assert_eq!(matches.hits, 2);
+        assert_eq!(matches.warn_hits, 1);
+        assert_eq!(matches.critical_hits, 1);
+        assert_eq!(matches.severity, Severity::Critical);
+    }
 }

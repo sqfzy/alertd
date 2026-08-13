@@ -34,6 +34,9 @@ pub struct Observation {
     pub summary: String,
     pub details: BTreeMap<String, String>,
     pub observed_at: DateTime<Utc>,
+    pub event: bool,
+    pub warn_occurrences: u64,
+    pub critical_occurrences: u64,
 }
 
 impl Observation {
@@ -44,6 +47,9 @@ impl Observation {
             summary: summary.into(),
             details: BTreeMap::new(),
             observed_at: Utc::now(),
+            event: false,
+            warn_occurrences: 0,
+            critical_occurrences: 0,
         }
     }
 
@@ -54,11 +60,21 @@ impl Observation {
             summary: summary.into(),
             details: BTreeMap::new(),
             observed_at: Utc::now(),
+            event: false,
+            warn_occurrences: 0,
+            critical_occurrences: 0,
         }
     }
 
     pub fn detail(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.details.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn event_counts(mut self, warn: u64, critical: u64) -> Self {
+        self.event = true;
+        self.warn_occurrences = warn;
+        self.critical_occurrences = critical;
         self
     }
 }
@@ -68,6 +84,7 @@ pub enum Transition {
     Firing,
     Repeating,
     Resolved,
+    Event,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +104,16 @@ pub struct CheckState {
     pub pending_since: Option<DateTime<Utc>>,
     pub firing_since: Option<DateTime<Utc>>,
     pub last_sent_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub recovering_since: Option<DateTime<Utc>>,
     pub severity: Severity,
     pub collection_failures: u32,
+    #[serde(default)]
+    pub event_window_count: u64,
+    #[serde(default)]
+    pub event_severity: Severity,
+    #[serde(default)]
+    pub daily_warn_count: u64,
+    #[serde(default)]
+    pub daily_critical_count: u64,
 }
