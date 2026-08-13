@@ -33,13 +33,13 @@ units = [
 [[checks]]
 name = "bn-spot-market-writer"
 type = "process"
-cmdline_contains = "bn_read_all_market_dpdk_ens7_colo_mm/zt_bn_read_all_market_dpdk_ens7_colo_mm 2"
-min_count = 1
+cmdline_contains = "bn_read_all_market_dpdk_ena5_test/zt_bn_read_all_market_dpdk_ena5_test"
+min_count = 3
 
 [[checks]]
 name = "bn-swap-book-writers"
 type = "process"
-cmdline_contains = "bn_read_booktick_raw_dpdk_ens7_colo_mm/zt_bn_read_booktick_raw_dpdk_ens7_colo_mm"
+cmdline_contains = "bn_read_booktick_raw_dpdk_ens7/zt_bn_read_booktick_raw_dpdk_ens7"
 min_count = 2
 
 [[checks]]
