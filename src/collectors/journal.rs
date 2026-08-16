@@ -6,6 +6,7 @@ use crate::{
     model::{Observation, Severity},
 };
 use std::time::Duration;
+use tracing::info;
 
 #[derive(Debug)]
 struct JournalBatch {
@@ -17,14 +18,26 @@ struct JournalBatch {
 struct JournalMatches {
     severity: Severity,
     hits: u64,
+    ignored: u64,
     warn_hits: u64,
     critical_hits: u64,
     sample: String,
 }
 
-fn match_messages(messages: &[String], rules: &[JournalRule]) -> JournalMatches {
+fn match_messages(
+    messages: &[String],
+    ignore_contains: &[String],
+    rules: &[JournalRule],
+) -> JournalMatches {
     let mut matches = JournalMatches::default();
     for message in messages {
+        if ignore_contains
+            .iter()
+            .any(|ignored| message.contains(ignored))
+        {
+            matches.ignored += 1;
+            continue;
+        }
         for rule in rules {
             if message.contains(&rule.contains) {
                 matches.hits += 1;
@@ -108,6 +121,7 @@ fn read_batch(
 pub fn collect(
     check: &CheckConfig,
     units: &[String],
+    ignore_contains: &[String],
     rules: &[JournalRule],
     context: &mut CollectContext,
 ) -> Result<Observation, CollectError> {
@@ -116,7 +130,15 @@ pub fn collect(
         context.journal_cursors.get(&check.name).map(String::as_str),
         context.command_timeout,
     )?;
-    let matches = match_messages(&batch.messages, rules);
+    let matches = match_messages(&batch.messages, ignore_contains, rules);
+    if matches.ignored > 0 {
+        info!(
+            check = %check.name,
+            read = batch.messages.len(),
+            ignored = matches.ignored,
+            "journal messages filtered"
+        );
+    }
     if let Some(cursor) = batch.cursor {
         context
             .pending_journal_cursors
@@ -173,11 +195,75 @@ mod tests {
         ];
         let matches = match_messages(
             &["WARN first".into(), "normal".into(), "ERROR failed".into()],
+            &[],
             &rules,
         );
         assert_eq!(matches.hits, 2);
         assert_eq!(matches.warn_hits, 1);
         assert_eq!(matches.critical_hits, 1);
         assert_eq!(matches.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn ignores_messages_before_matching_alert_rules() {
+        let rules = vec![
+            JournalRule {
+                contains: "WARN".into(),
+                severity: Severity::Warn,
+            },
+            JournalRule {
+                contains: "ERROR".into(),
+                severity: Severity::Critical,
+            },
+        ];
+        let matches = match_messages(
+            &[
+                "ERROR expected during shutdown".into(),
+                "error expected during shutdown".into(),
+                "WARN retrying".into(),
+                "ERROR failed".into(),
+            ],
+            &["expected during shutdown".into(), "not present".into()],
+            &rules,
+        );
+
+        assert_eq!(matches.ignored, 2);
+        assert_eq!(matches.hits, 2);
+        assert_eq!(matches.warn_hits, 1);
+        assert_eq!(matches.critical_hits, 1);
+        assert_eq!(matches.severity, Severity::Critical);
+        assert_eq!(matches.sample, "WARN retrying");
+    }
+
+    #[test]
+    fn ignore_matching_is_case_sensitive() {
+        let rules = vec![JournalRule {
+            contains: "ERROR".into(),
+            severity: Severity::Critical,
+        }];
+        let matches = match_messages(&["ERROR failed".into()], &["error failed".into()], &rules);
+
+        assert_eq!(matches.ignored, 0);
+        assert_eq!(matches.hits, 1);
+    }
+
+    #[test]
+    fn fully_filtered_batch_has_no_alert_occurrences() {
+        let rules = vec![JournalRule {
+            contains: "ERROR".into(),
+            severity: Severity::Critical,
+        }];
+        let matches = match_messages(
+            &["ERROR expected during shutdown".into()],
+            &["expected during shutdown".into()],
+            &rules,
+        );
+
+        assert_eq!(matches.ignored, 1);
+        assert_eq!(matches.hits, 0);
+        assert_eq!(matches.warn_hits, 0);
+        assert_eq!(matches.critical_hits, 0);
+        assert_eq!(matches.severity, Severity::Ok);
+        assert!(matches.sample.is_empty());
     }
 }

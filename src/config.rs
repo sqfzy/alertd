@@ -213,6 +213,8 @@ pub enum CheckKind {
     },
     Journal {
         units: Vec<String>,
+        #[serde(default)]
+        ignore_contains: Vec<String>,
         rules: Vec<JournalRule>,
     },
     Systemd {
@@ -572,16 +574,20 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
             }
             Ok(())
         }
-        CheckKind::Journal { units, rules }
-            if units.is_empty()
-                || rules.is_empty()
-                || units.iter().any(String::is_empty)
-                || rules
-                    .iter()
-                    .any(|r| r.contains.is_empty() || r.severity == Severity::Ok) =>
+        CheckKind::Journal {
+            units,
+            ignore_contains,
+            rules,
+        } if units.is_empty()
+            || rules.is_empty()
+            || units.iter().any(String::is_empty)
+            || ignore_contains.iter().any(String::is_empty)
+            || rules
+                .iter()
+                .any(|r| r.contains.is_empty() || r.severity == Severity::Ok) =>
         {
             Err(ConfigError::Invalid(format!(
-                "check {} needs journal units and non-empty warn/critical rules",
+                "check {} needs journal units, non-empty filters, and non-empty warn/critical rules",
                 check.name
             )))
         }

@@ -75,7 +75,11 @@ pub fn collect(
             *layout_version,
             context,
         ),
-        CheckKind::Journal { units, rules } => journal::collect(check, units, rules, context),
+        CheckKind::Journal {
+            units,
+            ignore_contains,
+            rules,
+        } => journal::collect(check, units, ignore_contains, rules, context),
         CheckKind::Systemd { units } => systemd::collect(check, units, context.command_timeout),
         CheckKind::LatestFile {
             directory,

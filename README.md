@@ -34,7 +34,7 @@ alertd --config /etc/alertd/alertd.toml --send-test
 
 - `process`：扫描 `/proc/<pid>/cmdline`，检查匹配进程数量。
 - `shm`：支持 `exists`、`u64_counter` 和 `gconf_v2`；可只检查存在，也可检查进度停滞。`gconf_v2` 必须显式配置 ABI 的 `magic` 与 `layout_version`，BcastRing 按 head、Board 按 header heartbeat 与尾部 slot seqlock 判断进度；未知 SegKind fail-closed。
-- `journal`：按 systemd unit 读取 journald，使用普通子串规则区分 WARN/CRITICAL。
+- `journal`：按 systemd unit 读取 journald，使用普通、区分大小写的子串规则过滤已知噪声并区分 WARN/CRITICAL；`ignore_contains` 优先于告警规则。
 - `systemd`：通过 `systemctl show` 检查一组 service/timer 是否均为 loaded、active。
 - `latest_file`：按目录、前后缀选择最新普通文件，检查最小大小和 mtime 新鲜度，适用于滚动 raw/因子文件。
 - `disk`：按挂载点容量和 inode 已用比例分级，取更高严重度。

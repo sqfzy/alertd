@@ -90,6 +90,29 @@ minimum_size_bytes = 384
 }
 
 #[test]
+fn validates_optional_journal_filters() {
+    let text = r#"
+[[checks]]
+name = "journal"
+type = "journal"
+units = ["app.service"]
+ignore_contains = ["expected during shutdown"]
+rules = [{ contains = "ERROR", severity = "critical" }]
+"#;
+    let config: Config = toml::from_str(text).unwrap();
+    config::validate_config(&config).unwrap();
+
+    let without_filters: Config =
+        toml::from_str(&text.replace("ignore_contains = [\"expected during shutdown\"]\n", ""))
+            .unwrap();
+    config::validate_config(&without_filters).unwrap();
+
+    let empty_filter: Config =
+        toml::from_str(&text.replace("expected during shutdown", "")).unwrap();
+    assert!(config::validate_config(&empty_filter).is_err());
+}
+
+#[test]
 fn accepts_tickfeat_production_config() {
     let config = config::load_config(std::path::Path::new("config/tickfeat-bn-spot.toml")).unwrap();
     assert_eq!(config.checks.len(), 14);

@@ -46,6 +46,10 @@ stale_after = "180s"
 name = "service-errors"
 type = "journal"
 units = ["bybit-perp-market.service"]
+ignore_contains = [
+  "connection reset during shutdown",
+  "known harmless error",
+]
 rules = [
   { contains = "WARN", severity = "warn" },
   { contains = "ERROR", severity = "critical" },
