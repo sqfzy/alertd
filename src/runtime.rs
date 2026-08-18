@@ -59,6 +59,7 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
     let mut config = config::load_config(&options.config_path)?;
     let initial_host = resolve_host(&config);
     let mut persistent = state::load(&config.runtime.state_dir)?;
+    retain_active_check_state(&mut persistent, &config.checks);
     let queue = DeliveryQueue::open(&config.runtime.state_dir, config.delivery.queue_capacity)?;
     let initial_context = report::ReportContext {
         host: &initial_host,
@@ -117,6 +118,7 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
                 &options.config_path,
                 &mut config,
                 &mut persistent,
+                &mut context,
                 &queue,
                 options.dry_run,
             );
@@ -554,17 +556,13 @@ fn reload_config(
     path: &Path,
     config: &mut Config,
     persistent: &mut PersistentState,
+    context: &mut CollectContext,
     queue: &DeliveryQueue,
     dry_run: bool,
 ) {
     match config::load_config(path) {
         Ok(next) if startup_config_equal(config, &next) => {
-            let active_checks: HashSet<_> = next
-                .checks
-                .iter()
-                .filter(|check| check.enabled)
-                .map(|check| check.name.clone())
-                .collect();
+            let active_checks = active_check_names(&next.checks);
             match queue.discard_inactive_checks(&active_checks) {
                 Ok(discarded) if discarded != 0 => {
                     info!(discarded, "discarded queued alerts for inactive checks");
@@ -576,11 +574,13 @@ fn reload_config(
                     return;
                 }
             }
-            persistent.checks.retain(|name, _| {
-                next.checks.iter().any(|check| {
-                    &check.name == name || format!("{}/collector", check.name) == *name
-                })
-            });
+            retain_active_check_state(persistent, &next.checks);
+            context
+                .journal_cursors
+                .retain(|name, _| active_checks.contains(name));
+            context
+                .pending_journal_cursors
+                .retain(|name, _| active_checks.contains(name));
             *config = next;
             info!("configuration reloaded");
         }
@@ -597,6 +597,27 @@ fn reload_config(
             reject_reload(config, queue, dry_run, &error.to_string());
         }
     }
+}
+
+fn active_check_names(checks: &[CheckConfig]) -> HashSet<String> {
+    checks
+        .iter()
+        .filter(|check| check.enabled)
+        .map(|check| check.name.clone())
+        .collect()
+}
+
+fn retain_active_check_state(persistent: &mut PersistentState, checks: &[CheckConfig]) {
+    let active_checks = active_check_names(checks);
+    persistent.checks.retain(|name, _| {
+        active_checks.contains(name)
+            || name
+                .strip_suffix("/collector")
+                .is_some_and(|parent| active_checks.contains(parent))
+    });
+    persistent
+        .journal_cursors
+        .retain(|name, _| active_checks.contains(name));
 }
 
 fn startup_config_equal(current: &Config, next: &Config) -> bool {
@@ -761,5 +782,30 @@ critical_available_pct = 10
         let mut delivery = current.clone();
         delivery.delivery.queue_capacity = 2048;
         assert!(!startup_config_equal(&current, &delivery));
+    }
+
+    #[test]
+    fn removes_state_for_inactive_checks() {
+        let mut persistent = PersistentState::default();
+        persistent
+            .checks
+            .insert("memory".into(), CheckState::default());
+        persistent
+            .checks
+            .insert("memory/collector".into(), CheckState::default());
+        persistent
+            .checks
+            .insert("removed".into(), CheckState::default());
+        persistent
+            .journal_cursors
+            .insert("removed".into(), "old".into());
+
+        let config = config();
+        retain_active_check_state(&mut persistent, &config.checks);
+
+        assert!(persistent.checks.contains_key("memory"));
+        assert!(persistent.checks.contains_key("memory/collector"));
+        assert!(!persistent.checks.contains_key("removed"));
+        assert!(persistent.journal_cursors.is_empty());
     }
 }
