@@ -2,6 +2,7 @@ use crate::model::Severity;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -14,6 +15,8 @@ pub struct QueuedMessage {
     pub severity: Severity,
     pub text: String,
     pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_name: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -42,17 +45,32 @@ impl DeliveryQueue {
     }
 
     pub fn enqueue(&self, severity: Severity, text: String) -> Result<String, QueueError> {
-        self.enqueue_with_limit(severity, text, self.capacity.saturating_sub(1))
+        self.enqueue_with_limit(severity, text, None, self.capacity.saturating_sub(1))
+    }
+
+    pub fn enqueue_check(
+        &self,
+        check_name: &str,
+        severity: Severity,
+        text: String,
+    ) -> Result<String, QueueError> {
+        self.enqueue_with_limit(
+            severity,
+            text,
+            Some(check_name.to_owned()),
+            self.capacity.saturating_sub(1),
+        )
     }
 
     pub fn enqueue_internal(&self, severity: Severity, text: String) -> Result<String, QueueError> {
-        self.enqueue_with_limit(severity, text, self.capacity)
+        self.enqueue_with_limit(severity, text, None, self.capacity)
     }
 
     fn enqueue_with_limit(
         &self,
         severity: Severity,
         text: String,
+        check_name: Option<String>,
         limit: usize,
     ) -> Result<String, QueueError> {
         if self.pending_paths()?.len() >= limit {
@@ -68,6 +86,7 @@ impl DeliveryQueue {
             severity,
             text,
             attempts: 0,
+            check_name,
         };
         let temporary = self.root.join(format!(".{id}.tmp"));
         let final_path = self.root.join(format!("{id}.json"));
@@ -105,6 +124,28 @@ impl DeliveryQueue {
     }
     pub fn pending_count(&self) -> Result<usize, QueueError> {
         Ok(self.pending_paths()?.len())
+    }
+
+    pub fn discard_inactive_checks(
+        &self,
+        active_checks: &HashSet<String>,
+    ) -> Result<usize, QueueError> {
+        let mut discarded = 0;
+        for path in self.pending_paths()? {
+            let message: QueuedMessage = serde_json::from_slice(&fs::read(&path)?)?;
+            let is_inactive = message
+                .check_name
+                .as_ref()
+                .is_some_and(|name| !active_checks.contains(name));
+            if is_inactive {
+                fs::remove_file(path)?;
+                discarded += 1;
+            }
+        }
+        if discarded != 0 {
+            sync_dir(&self.root)?;
+        }
+        Ok(discarded)
     }
 
     fn pending_paths(&self) -> Result<Vec<PathBuf>, QueueError> {
@@ -159,5 +200,32 @@ mod tests {
         let result = queue.oldest();
         assert!(matches!(result, Err(QueueError::Quarantined(_))));
         assert!(temp.path().join("spool/quarantine/000.json").exists());
+    }
+
+    #[test]
+    fn discards_messages_for_removed_checks() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = DeliveryQueue::open(temp.path(), 16).unwrap();
+        queue
+            .enqueue_check("removed", Severity::Critical, "stale".into())
+            .unwrap();
+        queue
+            .enqueue_check("active", Severity::Warn, "keep".into())
+            .unwrap();
+        queue
+            .enqueue_internal(Severity::Ok, "internal".into())
+            .unwrap();
+
+        let active = HashSet::from(["active".to_owned()]);
+        assert_eq!(queue.discard_inactive_checks(&active).unwrap(), 1);
+        assert_eq!(queue.pending_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn reads_legacy_message_without_check_name() {
+        let message: QueuedMessage =
+            serde_json::from_str(r#"{"id":"old","severity":"warn","text":"legacy","attempts":0}"#)
+                .unwrap();
+        assert_eq!(message.check_name, None);
     }
 }

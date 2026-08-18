@@ -12,6 +12,7 @@ use chrono::Local;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{
         Arc, RwLock,
@@ -325,7 +326,7 @@ fn process_observation(
         return true;
     };
     let text = report::format_alert(report_context, &event);
-    let accepted = enqueue(queue, event.severity, text, dry_run);
+    let accepted = enqueue_check(queue, &check.name, event.severity, text, dry_run);
     if !accepted {
         *state = previous;
     }
@@ -344,6 +345,29 @@ fn enqueue(queue: &DeliveryQueue, severity: Severity, text: String, dry_run: boo
         }
         Err(error) => {
             error!(%error, "ALERT LOST: durable queue rejected message");
+            false
+        }
+    }
+}
+
+fn enqueue_check(
+    queue: &DeliveryQueue,
+    check_name: &str,
+    severity: Severity,
+    text: String,
+    dry_run: bool,
+) -> bool {
+    if dry_run {
+        println!("--- alertd dry-run ---\n{text}\n");
+        return true;
+    }
+    match queue.enqueue_check(check_name, severity, text) {
+        Ok(id) => {
+            info!(%id, %check_name, "alert queued");
+            true
+        }
+        Err(error) => {
+            error!(%error, %check_name, "ALERT LOST: durable queue rejected message");
             false
         }
     }
@@ -535,6 +559,23 @@ fn reload_config(
 ) {
     match config::load_config(path) {
         Ok(next) if startup_config_equal(config, &next) => {
+            let active_checks: HashSet<_> = next
+                .checks
+                .iter()
+                .filter(|check| check.enabled)
+                .map(|check| check.name.clone())
+                .collect();
+            match queue.discard_inactive_checks(&active_checks) {
+                Ok(discarded) if discarded != 0 => {
+                    info!(discarded, "discarded queued alerts for inactive checks");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    error!(%error, "configuration reload rejected; queued alerts could not be reconciled");
+                    reject_reload(config, queue, dry_run, &error.to_string());
+                    return;
+                }
+            }
             persistent.checks.retain(|name, _| {
                 next.checks.iter().any(|check| {
                     &check.name == name || format!("{}/collector", check.name) == *name
