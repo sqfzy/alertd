@@ -6,6 +6,18 @@ use alertd::{
 use chrono::{TimeZone, Utc};
 use std::collections::{BTreeMap, HashMap};
 
+fn context(ip: Option<&'static str>) -> ReportContext<'static> {
+    ReportContext {
+        host: "sg-alertd-test",
+        ip,
+        system_hostname: "ip-10-0-0-1.internal",
+        machine_sha256: "111111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        boot_sha256: "222222222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        pid: 4242,
+        config_sha256: "333333333333cccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    }
+}
+
 #[test]
 fn alert_fields_are_separate_markdown_paragraphs() {
     let event = AlertEvent {
@@ -19,14 +31,14 @@ fn alert_fields_are_separate_markdown_paragraphs() {
         runbook: None,
     };
 
-    let context = ReportContext {
-        host: "sg-alertd-test",
-        ip: Some("52.221.32.231"),
-    };
-    let text = report::format_alert(context, &event);
+    let text = report::format_alert(context(Some("52.221.32.231")), &event);
 
     assert!(text.contains("\n\n**主机：** sg-alertd-test"));
     assert!(text.contains("\n\n**IP：** 52.221.32.231"));
+    assert!(text.contains("\n\n**系统主机：** ip-10-0-0-1.internal"));
+    assert!(text.contains(
+        "\n\n**实例：** machine=111111111111 boot=222222222222 pid=4242 config=333333333333"
+    ));
     assert!(text.contains("\n\n**检查：** data-disk"));
     assert!(text.contains("\n\n**异常开始：**"));
     assert!(!text.contains("\n\n**开始：**"));
@@ -45,12 +57,7 @@ fn recovery_shows_readable_duration_and_recovery_time() {
         details: BTreeMap::new(),
         runbook: None,
     };
-    let context = ReportContext {
-        host: "sg-alertd-test",
-        ip: Some("52.221.32.231"),
-    };
-
-    let text = report::format_alert(context, &event);
+    let text = report::format_alert(context(Some("52.221.32.231")), &event);
 
     assert!(text.contains("\n\n**持续时间：** 2 小时 15 分钟 5 秒"));
     assert!(text.contains("\n\n**恢复时间：**"));
@@ -69,11 +76,7 @@ fn alert_omits_unconfigured_ip() {
         runbook: None,
     };
 
-    let context = ReportContext {
-        host: "host",
-        ip: None,
-    };
-    assert!(!report::format_alert(context, &event).contains("**IP：**"));
+    assert!(!report::format_alert(context(None), &event).contains("**IP：**"));
 }
 
 #[test]
@@ -89,13 +92,7 @@ fn journal_event_uses_occurrence_time_without_recovery_fields() {
         details: BTreeMap::from([("本次命中".into(), "2".into())]),
         runbook: None,
     };
-    let text = report::format_alert(
-        ReportContext {
-            host: "host",
-            ip: None,
-        },
-        &event,
-    );
+    let text = report::format_alert(context(None), &event);
     assert!(text.contains("**发生时间：**"));
     assert!(!text.contains("异常开始"));
     assert!(!text.contains("恢复时间"));
@@ -130,17 +127,32 @@ rules = [{ contains = "WARN", severity = "warn" }]
             ..Default::default()
         },
     );
-    let text = report::format_daily(
-        ReportContext {
-            host: "host",
-            ip: None,
-        },
-        &config.checks,
-        &[cpu],
-        &states,
-        2,
-    );
+    let text = report::format_daily(context(None), &config.checks, &[cpu], &states, 2);
     assert!(text.contains("**每核 CPU：** cpu0 10% · cpu1 30%"));
     assert!(text.contains("**日志 24h：** WARN 3，ERROR 1"));
     assert!(text.contains("**投递队列：** 2"));
+}
+
+#[test]
+fn every_message_kind_includes_the_same_identity() {
+    let make_event = |transition| AlertEvent {
+        check_name: "check".into(),
+        severity: Severity::Warn,
+        transition,
+        started_at: Utc::now(),
+        observed_at: Utc::now(),
+        summary: "summary".into(),
+        details: BTreeMap::new(),
+        runbook: None,
+    };
+    let expected = "**实例：** machine=111111111111 boot=222222222222 pid=4242 config=333333333333";
+    let messages = [
+        report::format_alert(context(None), &make_event(Transition::Firing)),
+        report::format_alert(context(None), &make_event(Transition::Repeating)),
+        report::format_alert(context(None), &make_event(Transition::Resolved)),
+        report::format_daily(context(None), &[], &[], &HashMap::new(), 0),
+        report::format_internal(context(None), Severity::Warn, "title", "detail"),
+        report::format_test(context(None)),
+    ];
+    assert!(messages.iter().all(|message| message.contains(expected)));
 }

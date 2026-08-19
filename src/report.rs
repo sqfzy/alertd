@@ -9,6 +9,11 @@ use std::collections::HashMap;
 pub struct ReportContext<'a> {
     pub host: &'a str,
     pub ip: Option<&'a str>,
+    pub system_hostname: &'a str,
+    pub machine_sha256: &'a str,
+    pub boot_sha256: &'a str,
+    pub pid: u32,
+    pub config_sha256: &'a str,
 }
 
 pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
@@ -23,6 +28,7 @@ pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
     if let Some(ip) = context.ip {
         push_field(&mut text, "IP", ip);
     }
+    push_identity(&mut text, context);
     push_field(&mut text, "检查", &event.check_name);
     push_field(&mut text, "状态", &event.summary);
     let time_label = if event.transition == Transition::Event {
@@ -78,6 +84,7 @@ pub fn format_daily(
     if let Some(ip) = context.ip {
         push_field(&mut text, "IP", ip);
     }
+    push_identity(&mut text, context);
     let mut current: Vec<_> = states
         .iter()
         .filter(|(_, state)| state.firing_since.is_some())
@@ -174,8 +181,20 @@ pub fn format_internal(
     if let Some(ip) = context.ip {
         push_field(&mut text, "IP", ip);
     }
+    push_identity(&mut text, context);
     push_field(&mut text, "状态", title);
     push_field(&mut text, "详情", detail);
+    text
+}
+
+pub fn format_test(context: ReportContext<'_>) -> String {
+    let mut text = "🟢 **OK · alertd 测试**".to_string();
+    push_field(&mut text, "主机", context.host);
+    if let Some(ip) = context.ip {
+        push_field(&mut text, "IP", ip);
+    }
+    push_identity(&mut text, context);
+    push_field(&mut text, "状态", "配置与钉钉投递正常");
     text
 }
 
@@ -185,6 +204,25 @@ fn is_healthy(observation: &Observation) -> bool {
 
 fn push_field(text: &mut String, label: &str, value: &str) {
     text.push_str(&format!("\n\n**{label}：** {value}"));
+}
+
+fn push_identity(text: &mut String, context: ReportContext<'_>) {
+    push_field(text, "系统主机", context.system_hostname);
+    push_field(
+        text,
+        "实例",
+        &format!(
+            "machine={} boot={} pid={} config={}",
+            short_fingerprint(context.machine_sha256),
+            short_fingerprint(context.boot_sha256),
+            context.pid,
+            short_fingerprint(context.config_sha256),
+        ),
+    );
+}
+
+fn short_fingerprint(value: &str) -> String {
+    value.chars().take(12).collect()
 }
 
 fn format_duration(total_seconds: i64) -> String {

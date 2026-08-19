@@ -23,13 +23,13 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    let mut config = exit_on_error(config::load_config(&cli.config));
+    let mut loaded_config = exit_on_error(config::load_config_with_sha256(&cli.config));
     if let Some(level) = cli.log_level {
-        config.runtime.log_level = level;
-        exit_on_error(config::validate_config(&config));
+        loaded_config.config.runtime.log_level = level;
+        exit_on_error(config::validate_config(&loaded_config.config));
     }
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(&config.runtime.log_level))
+        .with_env_filter(EnvFilter::new(&loaded_config.config.runtime.log_level))
         .with_target(false)
         .init();
     if cli.check_config {
@@ -37,11 +37,16 @@ fn main() {
         return;
     }
     if cli.send_test {
-        exit_on_error(runtime::send_test(&config, cli.dry_run));
+        exit_on_error(runtime::send_test(
+            &loaded_config.config,
+            loaded_config.source_sha256,
+            cli.dry_run,
+        ));
         return;
     }
     exit_on_error(runtime::run(RuntimeOptions {
         config_path: cli.config,
+        loaded_config,
         dry_run: cli.dry_run,
     }));
 }

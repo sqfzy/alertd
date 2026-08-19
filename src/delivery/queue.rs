@@ -228,4 +228,16 @@ mod tests {
                 .unwrap();
         assert_eq!(message.check_name, None);
     }
+
+    #[test]
+    fn preserves_identity_frozen_in_message_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = DeliveryQueue::open(temp.path(), 16).unwrap();
+        let frozen = "instance machine=old boot=old pid=1 config=old";
+        queue.enqueue(Severity::Warn, frozen.into()).unwrap();
+
+        let (_, message) = queue.oldest().unwrap().unwrap();
+
+        assert_eq!(message.text, frozen);
+    }
 }

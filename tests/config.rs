@@ -1,4 +1,5 @@
 use alertd::config::{self, Config};
+use sha2::{Digest, Sha256};
 
 fn valid() -> &'static str {
     r#"
@@ -17,6 +18,20 @@ critical_used_pct = 90
 fn accepts_minimal_config() {
     let config: Config = toml::from_str(valid()).unwrap();
     config::validate_config(&config).unwrap();
+}
+
+#[test]
+fn loaded_config_hashes_exact_source_bytes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("alertd.toml");
+    std::fs::write(&path, valid()).unwrap();
+
+    let loaded = config::load_config_with_sha256(&path).unwrap();
+
+    assert_eq!(
+        loaded.source_sha256,
+        format!("{:x}", Sha256::digest(valid().as_bytes()))
+    );
 }
 
 #[test]

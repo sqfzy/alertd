@@ -2,6 +2,7 @@ pub mod alarm;
 pub mod collectors;
 pub mod config;
 pub mod delivery;
+pub mod identity;
 pub mod model;
 pub mod report;
 pub mod runtime;

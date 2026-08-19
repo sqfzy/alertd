@@ -1,8 +1,9 @@
 use crate::{
     alarm::{self, AlarmPolicy},
     collectors::{self, CollectContext},
-    config::{self, CheckConfig, Config},
+    config::{self, CheckConfig, Config, LoadedConfig},
     delivery::{dingtalk::DingTalkClient, queue::DeliveryQueue},
+    identity::{self, RuntimeIdentity},
     model::{CheckState, Observation, Severity},
     report,
     state::{self, PersistentState},
@@ -34,12 +35,15 @@ pub enum RuntimeError {
     Queue(#[from] crate::delivery::queue::QueueError),
     #[error(transparent)]
     DingTalk(#[from] crate::delivery::dingtalk::DingTalkError),
+    #[error(transparent)]
+    Identity(#[from] identity::IdentityError),
     #[error("signal registration failed: {0}")]
     Signal(#[from] std::io::Error),
 }
 
 pub struct RuntimeOptions {
     pub config_path: PathBuf,
+    pub loaded_config: LoadedConfig,
     pub dry_run: bool,
 }
 
@@ -49,26 +53,17 @@ struct RuntimeHealth {
     state_save_failed: bool,
 }
 
-#[derive(Clone)]
-struct RuntimeIdentity {
-    host: String,
-    ip: Option<String>,
-}
-
 pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
-    let mut config = config::load_config(&options.config_path)?;
-    let initial_host = resolve_host(&config);
+    let LoadedConfig {
+        mut config,
+        source_sha256,
+    } = options.loaded_config;
+    let initial_identity = identity::load_runtime_identity(&config, source_sha256)?;
     let mut persistent = state::load(&config.runtime.state_dir)?;
     retain_active_check_state(&mut persistent, &config.checks);
     let queue = DeliveryQueue::open(&config.runtime.state_dir, config.delivery.queue_capacity)?;
-    let initial_context = report::ReportContext {
-        host: &initial_host,
-        ip: config.runtime.ip.as_deref(),
-    };
-    let identity = Arc::new(RwLock::new(RuntimeIdentity {
-        host: initial_host.clone(),
-        ip: config.runtime.ip.clone(),
-    }));
+    let initial_context = report_context(&initial_identity);
+    let identity = Arc::new(RwLock::new(initial_identity.clone()));
     if persistent.clean_shutdown == Some(false) {
         enqueue_internal(
             &queue,
@@ -110,7 +105,15 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
     };
     let mut observations = Vec::new();
     let mut health = RuntimeHealth::default();
-    info!(host = initial_host, "alertd started");
+    info!(
+        host = initial_identity.host,
+        system_hostname = initial_identity.system_hostname,
+        machine_sha256 = initial_identity.machine_sha256,
+        boot_sha256 = initial_identity.boot_sha256,
+        pid = initial_identity.pid,
+        config_sha256 = initial_identity.config_sha256,
+        "alertd started"
+    );
     notify_systemd("READY=1");
     while !stop.load(Ordering::Relaxed) {
         if reload.swap(false, Ordering::Relaxed) {
@@ -120,18 +123,12 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
                 &mut persistent,
                 &mut context,
                 &queue,
+                &identity,
                 options.dry_run,
             );
         }
-        let host = resolve_host(&config);
-        if let Ok(mut current) = identity.write() {
-            current.host.clone_from(&host);
-            current.ip.clone_from(&config.runtime.ip);
-        }
-        let report_context = report::ReportContext {
-            host: &host,
-            ip: config.runtime.ip.as_deref(),
-        };
+        let current_identity = read_identity(&identity);
+        let report_context = report_context(&current_identity);
         observations.clear();
         run_checks(
             &config,
@@ -187,13 +184,13 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-pub fn send_test(config: &Config, dry_run: bool) -> Result<(), RuntimeError> {
-    let host = resolve_host(config);
-    let mut text = format!("🟢 **OK · alertd 测试**\n\n**主机：** {host}");
-    if let Some(ip) = &config.runtime.ip {
-        text.push_str(&format!("\n\n**IP：** {ip}"));
-    }
-    text.push_str("\n\n**状态：** 配置与钉钉投递正常");
+pub fn send_test(
+    config: &Config,
+    config_sha256: String,
+    dry_run: bool,
+) -> Result<(), RuntimeError> {
+    let identity = identity::load_runtime_identity(config, config_sha256)?;
+    let text = report::format_test(report_context(&identity));
     if dry_run {
         println!("{text}");
     } else {
@@ -462,14 +459,8 @@ fn start_delivery_worker(
         let mut consecutive_failures = 0_u32;
         let mut degraded = false;
         while !stop.load(Ordering::Relaxed) {
-            let current = identity
-                .read()
-                .map(|value| value.clone())
-                .unwrap_or_else(|value| value.into_inner().clone());
-            let context = report::ReportContext {
-                host: &current.host,
-                ip: current.ip.as_deref(),
-            };
+            let current = read_identity(&identity);
+            let context = report_context(&current);
             match drain_once(&queue, &client, context) {
                 DrainOutcome::Failed => {
                     consecutive_failures = consecutive_failures.saturating_add(1);
@@ -558,11 +549,12 @@ fn reload_config(
     persistent: &mut PersistentState,
     context: &mut CollectContext,
     queue: &DeliveryQueue,
+    identity: &Arc<RwLock<RuntimeIdentity>>,
     dry_run: bool,
 ) {
-    match config::load_config(path) {
-        Ok(next) if startup_config_equal(config, &next) => {
-            let active_checks = active_check_names(&next.checks);
+    match config::load_config_with_sha256(path) {
+        Ok(next) if startup_config_equal(config, &next.config) => {
+            let active_checks = active_check_names(&next.config.checks);
             match queue.discard_inactive_checks(&active_checks) {
                 Ok(discarded) if discarded != 0 => {
                     info!(discarded, "discarded queued alerts for inactive checks");
@@ -570,23 +562,24 @@ fn reload_config(
                 Ok(_) => {}
                 Err(error) => {
                     error!(%error, "configuration reload rejected; queued alerts could not be reconciled");
-                    reject_reload(config, queue, dry_run, &error.to_string());
+                    reject_reload(identity, queue, dry_run, &error.to_string());
                     return;
                 }
             }
-            retain_active_check_state(persistent, &next.checks);
+            retain_active_check_state(persistent, &next.config.checks);
             context
                 .journal_cursors
                 .retain(|name, _| active_checks.contains(name));
             context
                 .pending_journal_cursors
                 .retain(|name, _| active_checks.contains(name));
-            *config = next;
-            info!("configuration reloaded");
+            *config = next.config;
+            update_identity(identity, config, next.source_sha256.clone());
+            info!(config_sha256 = next.source_sha256, "configuration reloaded");
         }
         Ok(_) => {
             reject_reload(
-                config,
+                identity,
                 queue,
                 dry_run,
                 "启动级字段发生变化：state_dir、log_level、command_timeout 或 delivery",
@@ -594,7 +587,7 @@ fn reload_config(
         }
         Err(error) => {
             error!(%error, "configuration reload rejected; old configuration remains active");
-            reject_reload(config, queue, dry_run, &error.to_string());
+            reject_reload(identity, queue, dry_run, &error.to_string());
         }
     }
 }
@@ -627,16 +620,18 @@ fn startup_config_equal(current: &Config, next: &Config) -> bool {
         && current.delivery == next.delivery
 }
 
-fn reject_reload(config: &Config, queue: &DeliveryQueue, dry_run: bool, detail: &str) {
-    let host = resolve_host(config);
+fn reject_reload(
+    identity: &Arc<RwLock<RuntimeIdentity>>,
+    queue: &DeliveryQueue,
+    dry_run: bool,
+    detail: &str,
+) {
+    let current = read_identity(identity);
     enqueue_internal(
         queue,
         Severity::Warn,
         report::format_internal(
-            report::ReportContext {
-                host: &host,
-                ip: config.runtime.ip.as_deref(),
-            },
+            report_context(&current),
             Severity::Warn,
             "配置热加载被拒绝",
             detail,
@@ -645,13 +640,28 @@ fn reject_reload(config: &Config, queue: &DeliveryQueue, dry_run: bool, detail: 
     );
 }
 
-fn resolve_host(config: &Config) -> String {
-    config.runtime.host.clone().unwrap_or_else(|| {
-        hostname::get()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned()
-    })
+fn update_identity(shared: &Arc<RwLock<RuntimeIdentity>>, config: &Config, config_sha256: String) {
+    let mut current = shared.write().unwrap_or_else(|value| value.into_inner());
+    identity::update_config_identity(&mut current, config, config_sha256);
+}
+
+fn read_identity(shared: &Arc<RwLock<RuntimeIdentity>>) -> RuntimeIdentity {
+    shared
+        .read()
+        .map(|value| value.clone())
+        .unwrap_or_else(|value| value.into_inner().clone())
+}
+
+fn report_context(identity: &RuntimeIdentity) -> report::ReportContext<'_> {
+    report::ReportContext {
+        host: &identity.host,
+        ip: identity.ip.as_deref(),
+        system_hostname: &identity.system_hostname,
+        machine_sha256: &identity.machine_sha256,
+        boot_sha256: &identity.boot_sha256,
+        pid: identity.pid,
+        config_sha256: &identity.config_sha256,
+    }
 }
 
 fn build_client(config: &Config) -> Result<DingTalkClient, RuntimeError> {
@@ -807,5 +817,64 @@ critical_available_pct = 10
         assert!(persistent.checks.contains_key("memory/collector"));
         assert!(!persistent.checks.contains_key("removed"));
         assert!(persistent.journal_cursors.is_empty());
+    }
+
+    #[test]
+    fn hot_reload_updates_identity_only_after_success() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("alertd.toml");
+        let initial_text = r#"
+[runtime]
+host = "old-role"
+state_dir = "/tmp/alertd"
+[[checks]]
+name = "memory"
+type = "memory"
+warn_available_pct = 20
+critical_available_pct = 10
+"#;
+        std::fs::write(&config_path, initial_text).unwrap();
+        let mut current = config::load_config(&config_path).unwrap();
+        let identity = Arc::new(RwLock::new(RuntimeIdentity {
+            host: "old-role".into(),
+            ip: None,
+            system_hostname: "system-host".into(),
+            machine_sha256: "machine".into(),
+            boot_sha256: "boot".into(),
+            pid: 7,
+            config_sha256: "old-hash".into(),
+        }));
+        let queue = DeliveryQueue::open(temporary.path(), 16).unwrap();
+        let mut persistent = PersistentState::default();
+        let mut context = CollectContext::default();
+        let next_text = initial_text.replace("old-role", "new-role");
+        std::fs::write(&config_path, &next_text).unwrap();
+
+        reload_config(
+            &config_path,
+            &mut current,
+            &mut persistent,
+            &mut context,
+            &queue,
+            &identity,
+            true,
+        );
+        let accepted = read_identity(&identity);
+        assert_eq!(accepted.host, "new-role");
+        assert_ne!(accepted.config_sha256, "old-hash");
+
+        std::fs::write(&config_path, "invalid = [").unwrap();
+        reload_config(
+            &config_path,
+            &mut current,
+            &mut persistent,
+            &mut context,
+            &queue,
+            &identity,
+            true,
+        );
+        let rejected = read_identity(&identity);
+        assert_eq!(rejected.host, accepted.host);
+        assert_eq!(rejected.config_sha256, accepted.config_sha256);
     }
 }

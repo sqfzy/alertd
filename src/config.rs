@@ -1,5 +1,6 @@
 use crate::model::Severity;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs,
@@ -309,14 +310,27 @@ pub enum ConfigError {
     Invalid(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct LoadedConfig {
+    pub config: Config,
+    pub source_sha256: String,
+}
+
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
+    Ok(load_config_with_sha256(path)?.config)
+}
+
+pub fn load_config_with_sha256(path: &Path) -> Result<LoadedConfig, ConfigError> {
     let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
         path: path.into(),
         source,
     })?;
     let config: Config = toml::from_str(&text)?;
     validate_config(&config)?;
-    Ok(config)
+    Ok(LoadedConfig {
+        config,
+        source_sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+    })
 }
 
 pub fn parse_duration(value: &str) -> Result<Duration, ConfigError> {

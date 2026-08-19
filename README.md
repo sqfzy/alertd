@@ -28,6 +28,18 @@ alertd --config /etc/alertd/alertd.toml --send-test
 
 `runtime.host` 表示机器的稳定角色名，`runtime.ip` 可选，表示值班人员用于识别或连接该实例的主 IP。IP 不自动探测，避免多网卡、NAT 或隧道环境选错地址。
 
+所有外发消息还会携带实际系统 hostname 和发送实例指纹：`machine`、`boot`、`pid`、`config`。`machine` 用于区分复制了相同角色配置的机器，`boot` 用于区分同一机器的不同启动周期，`pid` 用于区分并行进程，`config` 用于识别实际生效的配置文件。`machine`、`boot` 和 `config` 的哈希来源分别是去除结尾空白后的 `/etc/machine-id`、`/proc/sys/kernel/random/boot_id` 和原始 TOML 字节；消息显示 SHA-256 前 12 位，启动日志记录完整 SHA-256。身份在消息进入持久队列时冻结，重启后补发也不会被改写成新进程身份。
+
+可在目标机核对指纹：
+
+```sh
+printf %s "$(cat /etc/machine-id)" | sha256sum
+printf %s "$(cat /proc/sys/kernel/random/boot_id)" | sha256sum
+sha256sum /etc/alertd/alertd.toml
+```
+
+运行模式要求 Linux 身份文件存在且非空，否则 alertd 拒绝启动；`--check-config` 只检查 TOML，不依赖主机身份文件。
+
 修改 TOML 后向进程发送 `SIGHUP`。新配置会先被完整解析和校验；失败时继续运行旧配置。
 
 ## Check 类型
@@ -62,6 +74,10 @@ alertd --config /etc/alertd/alertd.toml --send-test
 主机：bybit-sg
 
 IP：203.0.113.10
+
+系统主机：ip-10-0-0-12.internal
+
+实例：machine=6a61c41c93b2 boot=ea42b07bd751 pid=1682174 config=8e1f149f138a
 
 检查：bybit-book
 
