@@ -8,6 +8,24 @@ Collector → Observation → Alarm Engine → Event → Durable Queue → DingT
 
 项目刻意保持简单：一个 Rust 二进制、一份 TOML、一个 systemd unit；不依赖 Prometheus、数据库、中心服务或动态插件。
 
+## 文件组织
+
+```text
+alertd/
+├── src/
+│   ├── main.rs              # CLI 入口与进程启动
+│   ├── config.rs            # 严格 TOML 配置 POD 与校验
+│   ├── runtime.rs           # 采集循环、热加载与进程生命周期
+│   ├── alarm.rs             # pending、重复、升级和恢复状态机
+│   ├── report.rs            # 告警、日报和自监控消息格式
+│   ├── state.rs             # check 状态与 journal cursor 持久化
+│   ├── collectors/          # 各类事实采集器，包括通用数值快照
+│   └── delivery/            # 持久队列与钉钉投递
+├── config/                  # 完整配置示例与部署配置
+├── deploy/                  # systemd unit、测试配置和部署记录
+└── tests/                   # 跨模块配置、采集与报告测试
+```
+
 ## 构建与检查
 
 ```sh
@@ -49,6 +67,7 @@ sha256sum /etc/alertd/alertd.toml
 - `journal`：按 systemd unit 读取 journald，使用普通、区分大小写的子串规则过滤已知噪声并区分 WARN/CRITICAL；`ignore_contains` 优先于告警规则。
 - `systemd`：通过 `systemctl show` 检查一组 service/timer 是否均为 loaded、active。
 - `latest_file`：按目录、前后缀选择最新普通文件，检查最小大小和 mtime 新鲜度，适用于滚动 raw/因子文件。
+- `metrics_file`：读取业务侧原子覆盖的 JSON 数值快照，检查文件新鲜度和可选的 WARN/CRITICAL 上限，并把配置指标加入日报。
 - `disk`：按挂载点容量和 inode 已用比例分级，取更高严重度。
 - `memory`：按 `MemAvailable/MemTotal` 分级。
 - `cpu`：按 `/proc/stat` 连续采样计算每个逻辑 CPU 的使用率，告警和日报均显示全部核心。
@@ -57,6 +76,21 @@ sha256sum /etc/alertd/alertd.toml
 - `system_tuning`：只读检查 `lat_tune.sh` 定义的当前内核、RT、irqbalance、IRQ、XPS/RPS 低延迟基线，不执行调优。
 
 所有 collector 只产出事实。统一告警状态机负责等待、升级、重复与恢复防抖；采集器连续失败会产生独立的“监控采集盲区”告警。journald 是事件型检查：命中会聚合和限频，不会因下一轮没有新日志而发送虚假恢复。
+
+### 数值快照契约
+
+`metrics_file` 不读取 SHM 或原始 dump，也不计算平均值、max 或 p99。dump 程序或业务侧适配器负责生成不超过 64 KiB 的顶层 JSON 对象，配置选中的字段必须是有限数值：
+
+```json
+{
+  "latency_latest_us": 17,
+  "latency_max_us": 430,
+  "latency_p99_us": 82,
+  "samples": 182440
+}
+```
+
+生成方必须先完整写入同目录临时文件，再原子 rename 到配置的 `path`。alertd 按 `runtime.interval` 读取最新快照，通过 mtime 和 `stale_after` 检查更新状态；正常数字只进入现有日报，达到可选阈值时复用统一告警状态机。
 
 `system_tuning` 严格检查当前运行态：CPU0 housekeeping、其余 present CPU 隔离，`isolcpus/nohz_full/rcu_nocbs`、`rcu_nocb_poll`、`irqaffinity=0`、`mitigations=off`、`nowatchdog`、`nosoftlockup`、RT throttle、irqbalance 和数据口 IRQ/XPS/RPS。基线来自 `lat_tune.sh` SHA-256 `27c6096d9b907b8207a5d440cce9c6c6ffce63d90a27ea37fc53870261377da8`。它不检查持久化文件，也不自动修复；`mitigations=off` 是以安全缓解换取延迟，只适用于受控隔离环境。
 

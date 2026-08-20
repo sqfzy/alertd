@@ -71,6 +71,18 @@ stale_after = "120s"
 minimum_size_bytes = 384
 
 [[checks]]
+name = "market-latency"
+type = "metrics_file"
+path = "/run/market/latency.metrics.json"
+stale_after = "90s"
+metrics = [
+  { key = "latency_latest_us" },
+  { key = "latency_p99_us", warn_above = 80, critical_above = 120 },
+  { key = "latency_max_us", critical_above = 500 },
+  { key = "samples" },
+]
+
+[[checks]]
 name = "data-disk"
 type = "disk"
 mount = "/mnt/jt"

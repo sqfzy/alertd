@@ -113,11 +113,30 @@ name = "journal"
 type = "journal"
 units = ["app.service"]
 rules = [{ contains = "WARN", severity = "warn" }]
+
+[[checks]]
+name = "latency"
+type = "metrics_file"
+path = "/run/market/latency.metrics.json"
+stale_after = "90s"
+metrics = [
+  { key = "latency_p99_us", warn_above = 80 },
+  { key = "samples" },
+]
+
+[[checks]]
+name = "unavailable-metrics"
+type = "metrics_file"
+path = "/run/market/unavailable.json"
+stale_after = "90s"
+metrics = [{ key = "value" }]
 "#,
     )
     .unwrap();
     let cpu = alertd::model::Observation::healthy("cpu", "CPU 平均 20%，最高 cpu1 30%")
         .detail("每核", "cpu0 10% · cpu1 30%");
+    let metrics = alertd::model::Observation::healthy("latency", "指标快照正常")
+        .detail("指标", "latency_p99_us=72\nsamples=180000");
     let mut states = HashMap::new();
     states.insert(
         "journal".into(),
@@ -127,10 +146,19 @@ rules = [{ contains = "WARN", severity = "warn" }]
             ..Default::default()
         },
     );
-    let text = report::format_daily(context(None), &config.checks, &[cpu], &states, 2);
+    let text = report::format_daily(context(None), &config.checks, &[cpu, metrics], &states, 2);
     assert!(text.contains("**每核 CPU：** cpu0 10% · cpu1 30%"));
+    assert!(text.contains(
+        "**业务指标：** latency: latency_p99_us=72 · samples=180000\nunavailable-metrics: 不可用"
+    ));
     assert!(text.contains("**日志 24h：** WARN 3，ERROR 1"));
     assert!(text.contains("**投递队列：** 2"));
+}
+
+#[test]
+fn daily_report_omits_empty_metrics_group() {
+    let text = report::format_daily(context(None), &[], &[], &HashMap::new(), 0);
+    assert!(!text.contains("**业务指标：**"));
 }
 
 #[test]

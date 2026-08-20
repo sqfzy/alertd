@@ -128,6 +128,74 @@ rules = [{ contains = "ERROR", severity = "critical" }]
 }
 
 #[test]
+fn validates_metrics_file_contract() {
+    let text = r#"
+[runtime]
+interval = "10s"
+
+[[checks]]
+name = "latency"
+type = "metrics_file"
+path = "/run/market/latency.metrics.json"
+stale_after = "30s"
+metrics = [
+  { key = "latest" },
+  { key = "p99", warn_above = 80, critical_above = 120 },
+  { key = "max", critical_above = 500 },
+]
+"#;
+    let config: Config = toml::from_str(text).unwrap();
+    config::validate_config(&config).unwrap();
+
+    let mut empty_metrics = config.clone();
+    let config::CheckKind::MetricsFile { metrics, .. } = &mut empty_metrics.checks[0].kind else {
+        panic!("expected metrics_file check");
+    };
+    metrics.clear();
+    assert!(config::validate_config(&empty_metrics).is_err());
+
+    let mut too_many_metrics = config.clone();
+    let config::CheckKind::MetricsFile { metrics, .. } = &mut too_many_metrics.checks[0].kind
+    else {
+        panic!("expected metrics_file check");
+    };
+    metrics.clear();
+    metrics.extend((0..65).map(|index| config::MetricRule {
+        key: format!("metric-{index}"),
+        warn_above: None,
+        critical_above: None,
+    }));
+    assert!(config::validate_config(&too_many_metrics).is_err());
+
+    for invalid in [
+        text.replace("/run/market/latency.metrics.json", "relative.json"),
+        text.replace("stale_after = \"30s\"", "stale_after = \"5s\""),
+        text.replace(
+            "{ key = \"max\", critical_above = 500 },",
+            "{ key = \"p99\" },",
+        ),
+        text.replace("warn_above = 80", "warn_above = 120"),
+        text.replace("warn_above = 80", "warn_above = nan"),
+        text.replace("{ key = \"latest\" },", "{ key = \"\" },"),
+        text.replace(
+            "{ key = \"latest\" },",
+            &format!("{{ key = \"{}\" }},", "x".repeat(129)),
+        ),
+    ] {
+        let config: Config = toml::from_str(&invalid).unwrap();
+        assert!(config::validate_config(&config).is_err());
+    }
+
+    assert!(
+        toml::from_str::<Config>(&text.replace(
+            "{ key = \"latest\" },",
+            "{ key = \"latest\", unknown = 1 },"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
 fn accepts_tickfeat_production_config() {
     let config = config::load_config(std::path::Path::new("config/tickfeat-bn-spot.toml")).unwrap();
     assert_eq!(config.checks.len(), 14);
