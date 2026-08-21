@@ -1,3 +1,5 @@
+//! 由 CLI 和 daemon 共享的单窗口状态、原子文件操作与进程间锁。
+
 use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,6 +17,7 @@ const MAX_REASON_BYTES: usize = 256;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+/// 持久化维护请求；绝对结束时间保留调用者提供的时区。
 pub struct MaintenanceWindow {
     pub id: String,
     pub requested_at: DateTime<FixedOffset>,
@@ -25,12 +28,14 @@ pub struct MaintenanceWindow {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// daemon 在当前时刻对窗口生命周期的判断。
 pub enum MaintenancePhase {
     Active,
     Ending,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// CLI 结合窗口文件和持久通知 ID 展示的维护状态。
 pub enum MaintenanceStatus {
     PendingStartNotice,
     Active,
@@ -218,6 +223,7 @@ fn with_lock<T>(
         .write(true)
         .mode(0o600)
         .open(state_dir.join(LOCK_NAME))?;
+    // SAFETY: fd 在调用时由 `lock` 持有且有效；锁随该 File 保持到 operation 返回后释放。
     let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
     if result != 0 {
         return Err(std::io::Error::last_os_error().into());

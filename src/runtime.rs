@@ -1,3 +1,5 @@
+//! 守护进程编排：采集、维护窗口、热加载、日报、自监控和有界关闭。
+
 use crate::{
     alarm::{self, AlarmPolicy},
     collectors::{self, CollectContext},
@@ -251,6 +253,7 @@ fn update_maintenance(
                 &config.runtime.state_dir,
                 &window,
             );
+            // 窗口标记只能在结束通知已被持久队列接受后删除；否则下轮继续重试。
             if persistent.maintenance_end_notice_id.as_deref() == Some(window.id.as_str()) {
                 if let Err(error_value) =
                     maintenance::remove_if_id(&config.runtime.state_dir, &window.id)
@@ -387,6 +390,7 @@ fn run_checks(
         match collectors::collect(check, context) {
             Ok(observation) => {
                 if maintenance_active {
+                    // 维护期间仍采集以更新 cursor/采样基线，但绝不推进 CheckState。
                     record_suppressed_observation(check, context, &observation);
                     observations.push(observation);
                     continue;
@@ -411,6 +415,7 @@ fn run_checks(
                     dry_run,
                 );
                 if accepted {
+                    // 需要通知时，journal cursor 必须晚于消息入队，避免队列拒绝时越过日志。
                     if let Some(cursor) = context.pending_journal_cursors.remove(&check.name) {
                         context.journal_cursors.insert(check.name.clone(), cursor);
                     }
@@ -468,6 +473,7 @@ fn record_suppressed_observation(
         "observation suppressed by maintenance window"
     );
     if let Some(cursor) = context.pending_journal_cursors.remove(&check.name) {
+        // 维护抑制已明确消费该日志批次，提交 cursor 可避免恢复后回放。
         context.journal_cursors.insert(check.name.clone(), cursor);
     }
 }

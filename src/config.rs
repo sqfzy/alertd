@@ -1,3 +1,5 @@
+//! 严格 TOML 配置 POD、范围校验和钉钉环境密钥解析。
+
 use crate::model::Severity;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -88,6 +90,7 @@ fn default_critical_inode_used_pct() -> f64 {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+/// alertd 的完整运行配置；未知字段在反序列化阶段即被拒绝。
 pub struct Config {
     #[serde(default)]
     pub runtime: RuntimeConfig,
@@ -194,6 +197,7 @@ impl Default for DeliveryConfig {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+/// 每类 check 的严格、互斥配置载荷。
 pub enum CheckKind {
     Process {
         cmdline_contains: String,
