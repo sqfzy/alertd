@@ -1,33 +1,53 @@
 [runtime]
-# host = "bybit-sg" # 省略时读取 hostname
-# ip = "203.0.113.10" # 可选；填写值班人员可直接连接或识别的主地址
+# 稳定角色名，1..=128 字节；省略时读取 hostname。
+# host = "market-sg"
+# 可选 IPv4/IPv6；仅用于消息识别，不自动探测。
+# ip = "203.0.113.10"
+# 采样周期：5s..=1h。
 interval = "30s"
+# 绝对路径；状态、队列和维护窗口均保存在这里。
 state_dir = "/var/lib/alertd"
+# trace/debug/info/warn/error；CLI --log-level 可覆盖启动值。
 log_level = "info"
+# 外部命令超时：200ms..=30s。
 command_timeout = "3s"
 
 [alarm]
+# 全局异常等待与恢复防抖：0s..=24h；单个 check 可覆盖。
 pending_for = "90s"
 recover_for = "60s"
+# 重复通知周期：1m..=24h。
 warn_repeat = "30m"
 critical_repeat = "10m"
-daily_report_at = "02:00" # 设为 "off" 关闭日报
+# 本地时区 HH:MM；设为 "off" 关闭日报。
+daily_report_at = "02:00"
+# Collector 连续失败次数：1..=100；与业务异常状态分开。
 collect_fail_after_n = 3
 
 [delivery]
+# 值是环境变量名，密钥不写入 TOML。
 token_env = "ALERTD_DINGTALK_TOKEN"
 secret_env = "ALERTD_DINGTALK_SECRET"
+# HTTP 超时：200ms..=30s。
 timeout = "3s"
+# 持久队列容量：16..=65536；最后一个槽保留给内部事件。
 queue_capacity = 1024
+# 队列水位：50..=95%；连续投递失败阈值：1..=100。
 queue_warn_pct = 80
 failure_report_after = 3
+# 指数退避：initial 1s..=1h，max 必须不小于 initial 且不超过 24h。
 retry_initial = "5s"
 retry_max = "5m"
+# CRITICAL 是否 @所有人。
 at_all_on_critical = false
 
+# 所有 check 的 name 全局唯一（1..=128 字节）。enabled 默认 true，
+# severity 默认 critical；pending_for/recover_for 可覆盖全局 0s..=24h，
+# runbook 可选且必须为 HTTP(S) URL。
 [[checks]]
 name = "bybit-market"
 type = "process"
+# 区分大小写的命令行子串；min_count 为 1..=1024，默认 1。
 cmdline_contains = "/current/bin/bybit_perp_market"
 min_count = 1
 runbook = "https://runbook.example/process-down"
@@ -35,17 +55,23 @@ runbook = "https://runbook.example/process-down"
 [[checks]]
 name = "bybit-book"
 type = "shm"
+# 合法 POSIX SHM 名。probe 可为 exists/u64_counter/gconf_v2。
 path = "/shm_bybit_lin_book_tick_v2"
 probe = "gconf_v2"
-magic = 0 # 部署前填写对应 gconf SegHeader 的十进制 magic
+# u64_counter 必须改为配置非负 offset 与 endian="little"/"big"。
+# gconf_v2 必须显式填写 ABI magic 与 layout_version。
+magic = 0 # 部署前填写对应 gconf SegHeader 的十进制 magic。
 layout_version = 2
+# require_progress 默认 false；启用时 stale_after 必填且不短于采样周期。
 require_progress = true
 stale_after = "180s"
 
 [[checks]]
 name = "service-errors"
 type = "journal"
+# 至少一个 unit 和一条规则；均使用区分大小写的普通子串。
 units = ["bybit-perp-market.service"]
+# ignore_contains 优先于 rules；每项必须非空。
 ignore_contains = [
   "connection reset during shutdown",
   "known harmless error",
@@ -59,21 +85,26 @@ rules = [
 [[checks]]
 name = "market-units"
 type = "systemd"
+# 1..=64 个非空 service/timer unit。
 units = ["market.service", "market-archive.timer"]
 
 [[checks]]
 name = "market-raw"
 type = "latest_file"
+# directory 必须为绝对路径；按 prefix/suffix 选择 mtime 最新的普通文件。
 directory = "/var/lib/market/raw"
 prefix = "market_raw_"
 suffix = ".bin"
+# stale_after 为采样周期..=24h；最小文件大小为 1..=1 TiB。
 stale_after = "120s"
 minimum_size_bytes = 384
 
 [[checks]]
 name = "data-disk"
 type = "disk"
+# mount 必须为绝对路径；容量和 inode 分别分级后取较高严重度。
 mount = "/mnt/jt"
+# 两组阈值都满足 0 < warn < critical <= 100；inode 默认 80/90。
 warn_used_pct = 80
 critical_used_pct = 90
 warn_inode_used_pct = 80
@@ -82,25 +113,30 @@ critical_inode_used_pct = 90
 [[checks]]
 name = "available-memory"
 type = "memory"
+# 按 MemAvailable/MemTotal；0 <= critical < warn < 100。
 warn_available_pct = 20
 critical_available_pct = 10
 
 [[checks]]
 name = "per-cpu"
 type = "cpu"
+# 每核连续采样；0 < warn < critical <= 100。
 warn_usage_pct = 80
 critical_usage_pct = 95
 
 [[checks]]
 name = "clock"
 type = "time_sync"
+# chronyc -c tracking 的绝对偏差；1ms <= warn < critical <= 1s。
 warn_offset = "1ms"
 critical_offset = "5ms"
 
 [[checks]]
 name = "network"
 type = "network"
+# 1..=64 个唯一 Linux 接口名；链路 DOWN 直接 CRITICAL。
 interfaces = ["ens5", "ens7"]
+# error/drop 速率均为每秒；有限非负且 warn < critical。
 warn_errors_per_second = 1
 critical_errors_per_second = 10
 warn_drops_per_second = 100
@@ -109,3 +145,4 @@ critical_drops_per_second = 1000
 [[checks]]
 name = "latency-baseline"
 type = "system_tuning"
+# 无专属开关：添加此 check 即检查完整的只读低延迟运行态基线。

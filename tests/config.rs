@@ -21,6 +21,15 @@ fn accepts_minimal_config() {
 }
 
 #[test]
+fn complete_example_matches_strict_schema() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/alertd.toml.example");
+
+    let config = config::load_config(&path).expect("complete example must remain valid");
+
+    assert_eq!(config.checks.len(), 11);
+}
+
+#[test]
 fn loaded_config_hashes_exact_source_bytes() {
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("alertd.toml");

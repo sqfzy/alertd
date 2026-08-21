@@ -1,3 +1,5 @@
+//! daemon 跨重启状态的兼容反序列化和原子落盘。
+
 use crate::model::CheckState;
 use serde::{Deserialize, Serialize};
 use std::{

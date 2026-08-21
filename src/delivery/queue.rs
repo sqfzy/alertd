@@ -1,3 +1,5 @@
+//! 以原子文件实现的有界持久队列，提供至少一次式本地交付。
+
 use crate::model::Severity;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -32,6 +34,7 @@ pub enum QueueError {
 }
 
 #[derive(Clone, Debug)]
+/// 位于 state_dir/spool 的有界持久消息队列。
 pub struct DeliveryQueue {
     root: PathBuf,
     capacity: usize,
@@ -45,6 +48,7 @@ impl DeliveryQueue {
     }
 
     pub fn enqueue(&self, severity: Severity, text: String) -> Result<String, QueueError> {
+        // 普通消息让出最后一个槽，使队列拥塞告警等内部事件仍能落盘。
         self.enqueue_with_limit(severity, text, None, self.capacity.saturating_sub(1))
     }
 
@@ -54,6 +58,7 @@ impl DeliveryQueue {
         severity: Severity,
         text: String,
     ) -> Result<String, QueueError> {
+        // Check 告警同样让出最后一个槽，避免拥塞遮蔽队列自身的内部告警。
         self.enqueue_with_limit(
             severity,
             text,
