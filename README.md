@@ -8,6 +8,25 @@ Collector → Observation → Alarm Engine → Event → Durable Queue → DingT
 
 项目刻意保持简单：一个 Rust 二进制、一份 TOML、一个 systemd unit；不依赖 Prometheus、数据库、中心服务或动态插件。
 
+## 源码组织
+
+```text
+alertd/
+├── src/
+│   ├── main.rs             CLI 解析与进程入口
+│   ├── config.rs           严格 TOML 配置模型与校验
+│   ├── runtime.rs          采集循环、热加载、日报与自监控编排
+│   ├── maintenance.rs      持久化维护窗口的 CLI 状态文件与生命周期
+│   ├── alarm.rs            pending、重复、升级和恢复状态机
+│   ├── model.rs            Observation、AlertEvent 与持久状态 POD
+│   ├── report.rs           钉钉告警、内部事件和日报排版
+│   ├── collectors/         各 check 的只读事实采集器
+│   └── delivery/           持久队列与钉钉投递
+├── config/                 完整配置示例与部署角色样例
+├── deploy/                 systemd、密钥环境文件和测试部署材料
+└── tests/                  配置、collector 与报告集成测试
+```
+
 ## 构建与检查
 
 ```sh
@@ -41,6 +60,28 @@ sha256sum /etc/alertd/alertd.toml
 运行模式要求 Linux 身份文件存在且非空，否则 alertd 拒绝启动；`--check-config` 只检查 TOML，不依赖主机身份文件。
 
 修改 TOML 后向进程发送 `SIGHUP`。新配置会先被完整解析和校验；失败时继续运行旧配置。
+
+## 维护窗口
+
+业务维护前可以立即暂停所有 check 告警，并指定自动恢复时间。该操作不修改 TOML，也不需要停止或重启 alertd：
+
+```sh
+alertd --config /etc/alertd/alertd.toml \
+  maintenance start \
+  --until '2026-08-21T16:00:00+08:00' \
+  --reason '业务重新部署'
+
+alertd --config /etc/alertd/alertd.toml maintenance status
+alertd --config /etc/alertd/alertd.toml maintenance cancel
+```
+
+`--until` 必须是带时区的 RFC3339 绝对时间，并且至少晚于当前时间一分钟；不限制最长窗口。`--reason` 必须为 1–256 字节且不能包含控制字符。重复 `start` 会被拒绝，`cancel` 在没有窗口时也会成功返回。
+
+CLI 将窗口原子写入 `runtime.state_dir/maintenance.json`，alertd 最多在一个采样周期内确认并向钉钉发送开始通知。正确的操作顺序是：**先设置维护窗口并用 `status` 确认，再停止业务服务**。`status` 会区分等待 daemon 确认、维护中、已取消或过期但等待结束通知，以及当前无窗口。
+
+维护期间 collector、journal cursor、CPU/network/SHM 采样基线、watchdog、自监控、状态保存和投递 worker 继续工作；已有队列消息继续发送。新的 check 告警、采集盲区告警和日报不会产生，日志也不会在恢复后回放。维护前已有的 pending/firing 状态原样保留。到期或人工取消后，检查立即恢复，不等待结束通知实际送达；结束通知成功进入持久队列后窗口文件才会删除。维护期间跳过的当日日报会在恢复后的下一轮补发。
+
+若窗口文件无法读取、JSON 损坏或字段非法，alertd 会 fail-open：保持正常监控，并发送一条去重的内部 WARN，避免错误状态造成长期静默。
 
 ## Check 类型
 

@@ -4,12 +4,13 @@ use crate::{
     config::{self, CheckConfig, Config, LoadedConfig},
     delivery::{dingtalk::DingTalkClient, queue::DeliveryQueue},
     identity::{self, RuntimeIdentity},
+    maintenance::{self, MaintenancePhase},
     model::{CheckState, Observation, Severity},
     report,
     state::{self, PersistentState},
     systemd_notify,
 };
-use chrono::Local;
+use chrono::{Local, Utc};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::{
@@ -51,6 +52,7 @@ pub struct RuntimeOptions {
 struct RuntimeHealth {
     queue_warned: bool,
     state_save_failed: bool,
+    maintenance_error: Option<String>,
 }
 
 pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
@@ -103,7 +105,6 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
         command_timeout: config::parse_duration(&config.runtime.command_timeout)?,
         ..Default::default()
     };
-    let mut observations = Vec::new();
     let mut health = RuntimeHealth::default();
     info!(
         host = initial_identity.host,
@@ -129,27 +130,36 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
         }
         let current_identity = read_identity(&identity);
         let report_context = report_context(&current_identity);
-        observations.clear();
-        run_checks(
+        let maintenance_active = update_maintenance(
+            &config,
+            report_context,
+            &mut persistent,
+            &queue,
+            options.dry_run,
+            &mut health,
+        );
+        let observations = run_checks(
             &config,
             report_context,
             &mut persistent,
             &mut context,
             &queue,
             options.dry_run,
-            &mut observations,
+            maintenance_active,
         );
         persistent
             .journal_cursors
             .clone_from(&context.journal_cursors);
-        maybe_daily(
-            &config,
-            report_context,
-            &mut persistent,
-            &queue,
-            options.dry_run,
-            &observations,
-        );
+        if !maintenance_active {
+            maybe_daily(
+                &config,
+                report_context,
+                &mut persistent,
+                &queue,
+                options.dry_run,
+                &observations,
+            );
+        }
         check_queue_health(
             &config,
             report_context,
@@ -199,6 +209,163 @@ pub fn send_test(
     Ok(())
 }
 
+fn update_maintenance(
+    config: &Config,
+    context: report::ReportContext<'_>,
+    persistent: &mut PersistentState,
+    queue: &DeliveryQueue,
+    dry_run: bool,
+    health: &mut RuntimeHealth,
+) -> bool {
+    let window = match maintenance::load(&config.runtime.state_dir) {
+        Ok(window) => {
+            health.maintenance_error = None;
+            window
+        }
+        Err(error_value) => {
+            report_maintenance_error(context, queue, dry_run, health, &error_value.to_string());
+            return false;
+        }
+    };
+    let Some(window) = window else {
+        return false;
+    };
+    match maintenance::phase(&window, Utc::now()) {
+        MaintenancePhase::Active => {
+            notify_maintenance_start(
+                context,
+                persistent,
+                queue,
+                dry_run,
+                &config.runtime.state_dir,
+                &window,
+            );
+            true
+        }
+        MaintenancePhase::Ending => {
+            notify_maintenance_end(
+                context,
+                persistent,
+                queue,
+                dry_run,
+                &config.runtime.state_dir,
+                &window,
+            );
+            if persistent.maintenance_end_notice_id.as_deref() == Some(window.id.as_str()) {
+                if let Err(error_value) =
+                    maintenance::remove_if_id(&config.runtime.state_dir, &window.id)
+                {
+                    error!(
+                        error = %error_value,
+                        id = %window.id,
+                        "cannot remove completed maintenance window"
+                    );
+                }
+            }
+            false
+        }
+    }
+}
+
+fn notify_maintenance_start(
+    context: report::ReportContext<'_>,
+    persistent: &mut PersistentState,
+    queue: &DeliveryQueue,
+    dry_run: bool,
+    state_dir: &Path,
+    window: &maintenance::MaintenanceWindow,
+) {
+    if persistent.maintenance_start_notice_id.as_deref() == Some(window.id.as_str()) {
+        return;
+    }
+    let detail = format!(
+        "原因：{}\n自动恢复：{}",
+        window.reason,
+        maintenance::format_time(window.until)
+    );
+    if enqueue_internal(
+        queue,
+        Severity::Warn,
+        report::format_internal(context, Severity::Warn, "维护窗口已开始", &detail),
+        dry_run,
+    ) {
+        persistent.maintenance_start_notice_id = Some(window.id.clone());
+        persist_maintenance_notice_state(state_dir, persistent);
+        info!(id = %window.id, until = %window.until, reason = %window.reason, "maintenance window active");
+    }
+}
+
+fn notify_maintenance_end(
+    context: report::ReportContext<'_>,
+    persistent: &mut PersistentState,
+    queue: &DeliveryQueue,
+    dry_run: bool,
+    state_dir: &Path,
+    window: &maintenance::MaintenanceWindow,
+) {
+    if persistent.maintenance_end_notice_id.as_deref() == Some(window.id.as_str()) {
+        return;
+    }
+    let (title, end_kind) = if window.cancelled_at.is_some() {
+        ("维护窗口已人工取消", "人工取消")
+    } else {
+        ("维护窗口已自动结束", "到达预定时间")
+    };
+    let detail = format!("原因：{}\n结束方式：{end_kind}", window.reason);
+    if enqueue_internal(
+        queue,
+        Severity::Ok,
+        report::format_internal(context, Severity::Ok, title, &detail),
+        dry_run,
+    ) {
+        persistent.maintenance_end_notice_id = Some(window.id.clone());
+        persist_maintenance_notice_state(state_dir, persistent);
+        info!(id = %window.id, reason = %window.reason, "maintenance window ended");
+    }
+}
+
+fn persist_maintenance_notice_state(state_dir: &Path, persistent: &PersistentState) {
+    if let Err(error_value) = state::save(state_dir, persistent) {
+        error!(
+            error = %error_value,
+            "cannot immediately persist maintenance notification identity"
+        );
+    }
+}
+
+fn report_maintenance_error(
+    context: report::ReportContext<'_>,
+    queue: &DeliveryQueue,
+    dry_run: bool,
+    health: &mut RuntimeHealth,
+    detail: &str,
+) {
+    if health.maintenance_error.as_deref() == Some(detail) {
+        debug!(
+            error = detail,
+            "maintenance state remains invalid; monitoring is active"
+        );
+        return;
+    }
+    error!(
+        error = detail,
+        "maintenance state invalid; monitoring remains active"
+    );
+    if enqueue_internal(
+        queue,
+        Severity::Warn,
+        report::format_internal(
+            context,
+            Severity::Warn,
+            "维护窗口状态无效，监控已 fail-open",
+            detail,
+        ),
+        dry_run,
+    ) {
+        health.maintenance_error = Some(detail.to_owned());
+    }
+}
+
 fn run_checks(
     config: &Config,
     report_context: report::ReportContext<'_>,
@@ -206,8 +373,9 @@ fn run_checks(
     context: &mut CollectContext,
     queue: &DeliveryQueue,
     dry_run: bool,
-    observations: &mut Vec<Observation>,
-) {
+    maintenance_active: bool,
+) -> Vec<Observation> {
+    let mut observations = Vec::new();
     let global_policy = AlarmPolicy::from_strings(
         &config.alarm.pending_for,
         &config.alarm.recover_for,
@@ -218,6 +386,11 @@ fn run_checks(
     for check in config.checks.iter().filter(|check| check.enabled) {
         match collectors::collect(check, context) {
             Ok(observation) => {
+                if maintenance_active {
+                    record_suppressed_observation(check, context, &observation);
+                    observations.push(observation);
+                    continue;
+                }
                 resolve_collector_alarm(
                     check,
                     persistent,
@@ -245,6 +418,14 @@ fn run_checks(
                 observations.push(observation);
             }
             Err(error_value) => {
+                if maintenance_active {
+                    warn!(
+                        check = %check.name,
+                        error = %error_value,
+                        "collector failed during maintenance; alarm state unchanged"
+                    );
+                    continue;
+                }
                 let state = persistent.checks.entry(check.name.clone()).or_default();
                 state.collection_failures = state.collection_failures.saturating_add(1);
                 warn!(check = %check.name, error = %error_value, failures = state.collection_failures, "collector failed");
@@ -272,6 +453,22 @@ fn run_checks(
                 observations.push(observation);
             }
         }
+    }
+    observations
+}
+
+fn record_suppressed_observation(
+    check: &CheckConfig,
+    context: &mut CollectContext,
+    observation: &Observation,
+) {
+    debug!(
+        check = %observation.check_name,
+        summary = %observation.summary,
+        "observation suppressed by maintenance window"
+    );
+    if let Some(cursor) = context.pending_journal_cursors.remove(&check.name) {
+        context.journal_cursors.insert(check.name.clone(), cursor);
     }
 }
 
@@ -778,6 +975,18 @@ critical_available_pct = 10
         .unwrap()
     }
 
+    fn test_report_context() -> report::ReportContext<'static> {
+        report::ReportContext {
+            host: "test-host",
+            ip: Some("192.0.2.1"),
+            system_hostname: "system-host",
+            machine_sha256: "machine",
+            boot_sha256: "boot",
+            pid: 7,
+            config_sha256: "config",
+        }
+    }
+
     #[test]
     fn hot_reload_rejects_startup_fields_only() {
         let current = config();
@@ -876,5 +1085,179 @@ critical_available_pct = 10
         let rejected = read_identity(&identity);
         assert_eq!(rejected.host, accepted.host);
         assert_eq!(rejected.config_sha256, accepted.config_sha256);
+    }
+
+    #[test]
+    fn maintenance_notices_are_deduplicated_and_window_is_removed() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.runtime.state_dir = temporary.path().into();
+        let queue = DeliveryQueue::open(temporary.path(), 16).unwrap();
+        let mut persistent = PersistentState::default();
+        let mut health = RuntimeHealth::default();
+        let until = (Utc::now() + chrono::Duration::hours(1)).fixed_offset();
+        let window =
+            maintenance::start(temporary.path(), until, "deploy".into(), Utc::now()).unwrap();
+
+        assert!(update_maintenance(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &queue,
+            false,
+            &mut health,
+        ));
+        assert_eq!(
+            persistent.maintenance_start_notice_id,
+            Some(window.id.clone())
+        );
+        assert_eq!(queue.pending_count().unwrap(), 1);
+        assert!(update_maintenance(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &queue,
+            false,
+            &mut health,
+        ));
+        assert_eq!(queue.pending_count().unwrap(), 1);
+
+        maintenance::cancel(temporary.path()).unwrap();
+        assert!(!update_maintenance(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &queue,
+            false,
+            &mut health,
+        ));
+        assert_eq!(persistent.maintenance_end_notice_id, Some(window.id));
+        assert_eq!(queue.pending_count().unwrap(), 2);
+        assert!(maintenance::load(temporary.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn invalid_maintenance_state_fails_open_and_warns_once() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.runtime.state_dir = temporary.path().into();
+        std::fs::write(temporary.path().join("maintenance.json"), "invalid").unwrap();
+        let queue = DeliveryQueue::open(temporary.path(), 16).unwrap();
+        let mut persistent = PersistentState::default();
+        let mut health = RuntimeHealth::default();
+
+        for _ in 0..2 {
+            assert!(!update_maintenance(
+                &config,
+                test_report_context(),
+                &mut persistent,
+                &queue,
+                false,
+                &mut health,
+            ));
+        }
+        assert_eq!(queue.pending_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn maintenance_start_notice_retries_after_queue_rejection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.runtime.state_dir = temporary.path().into();
+        let queue = DeliveryQueue::open(temporary.path(), 1).unwrap();
+        queue
+            .enqueue_internal(Severity::Warn, "occupied".into())
+            .unwrap();
+        let mut persistent = PersistentState::default();
+        let mut health = RuntimeHealth::default();
+        let until = (Utc::now() + chrono::Duration::hours(1)).fixed_offset();
+        let window =
+            maintenance::start(temporary.path(), until, "deploy".into(), Utc::now()).unwrap();
+
+        assert!(update_maintenance(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &queue,
+            false,
+            &mut health,
+        ));
+        assert_eq!(persistent.maintenance_start_notice_id, None);
+        let (path, _) = queue.oldest().unwrap().unwrap();
+        queue.acknowledge(&path).unwrap();
+
+        assert!(update_maintenance(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &queue,
+            false,
+            &mut health,
+        ));
+        assert_eq!(persistent.maintenance_start_notice_id, Some(window.id));
+    }
+
+    #[test]
+    fn maintenance_collection_preserves_alarm_state_and_commits_cursor() {
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temporary.path().join("meminfo"),
+            "MemTotal: 1000 kB\nMemAvailable: 50 kB\n",
+        )
+        .unwrap();
+        let config = config();
+        let queue_root = tempfile::tempdir().unwrap();
+        let queue = DeliveryQueue::open(queue_root.path(), 16).unwrap();
+        let mut state = CheckState {
+            pending_since: Some(Utc::now()),
+            collection_failures: 2,
+            ..Default::default()
+        };
+        state.daily_critical_count = 9;
+        let mut persistent = PersistentState::default();
+        persistent.checks.insert("memory".into(), state);
+        let before = serde_json::to_value(&persistent.checks).unwrap();
+        let mut context = CollectContext {
+            proc_root: Some(temporary.path().into()),
+            ..Default::default()
+        };
+        let observations = run_checks(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &mut context,
+            &queue,
+            false,
+            true,
+        );
+        assert_eq!(serde_json::to_value(&persistent.checks).unwrap(), before);
+        assert_eq!(queue.pending_count().unwrap(), 0);
+        assert_eq!(observations.len(), 1);
+
+        context
+            .pending_journal_cursors
+            .insert("memory".into(), "cursor-after-maintenance".into());
+        record_suppressed_observation(
+            &config.checks[0],
+            &mut context,
+            &Observation::healthy("memory", "suppressed"),
+        );
+        assert_eq!(
+            context.journal_cursors.get("memory").map(String::as_str),
+            Some("cursor-after-maintenance")
+        );
+
+        std::fs::remove_file(temporary.path().join("meminfo")).unwrap();
+        let observations = run_checks(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &mut context,
+            &queue,
+            false,
+            true,
+        );
+        assert_eq!(serde_json::to_value(&persistent.checks).unwrap(), before);
+        assert!(observations.is_empty());
     }
 }
