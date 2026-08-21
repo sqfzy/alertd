@@ -17,6 +17,10 @@ pub struct PersistentState {
     pub last_daily_date: Option<String>,
     #[serde(default)]
     pub clean_shutdown: Option<bool>,
+    #[serde(default)]
+    pub maintenance_start_notice_id: Option<String>,
+    #[serde(default)]
+    pub maintenance_end_notice_id: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -66,5 +70,7 @@ mod tests {
                 .expect("old state remains compatible");
 
         assert_eq!(state.clean_shutdown, None);
+        assert_eq!(state.maintenance_start_notice_id, None);
+        assert_eq!(state.maintenance_end_notice_id, None);
     }
 }
