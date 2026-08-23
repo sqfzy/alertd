@@ -316,6 +316,8 @@ pub struct JournalRule {
 #[serde(deny_unknown_fields)]
 pub struct MetricRule {
     pub key: String,
+    pub critical_below: Option<f64>,
+    pub warn_below: Option<f64>,
     pub warn_above: Option<f64>,
     pub critical_above: Option<f64>,
 }
@@ -335,6 +337,8 @@ pub struct ShmMetricRule {
     pub value_type: ShmValueType,
     #[serde(default)]
     pub endian: Endian,
+    pub critical_below: Option<f64>,
+    pub warn_below: Option<f64>,
     pub warn_above: Option<f64>,
     pub critical_above: Option<f64>,
 }
@@ -830,7 +834,13 @@ fn validate_metric_rules(
         || metrics.len() > 64
         || unique.len() != metrics.len()
         || metrics.iter().any(|metric| {
-            invalid_metric_fields(&metric.key, metric.warn_above, metric.critical_above)
+            invalid_metric_fields(
+                &metric.key,
+                metric.critical_below,
+                metric.warn_below,
+                metric.warn_above,
+                metric.critical_above,
+            )
         })
     {
         return Err(ConfigError::Invalid(format!(
@@ -862,11 +872,16 @@ fn validate_metrics_shm(
                 .is_none()
     });
     let invalid_metric = metrics.iter().any(|metric| {
-        invalid_metric_fields(&metric.key, metric.warn_above, metric.critical_above)
-            || metric
-                .offset
-                .checked_add(metric.value_type.width())
-                .is_none()
+        invalid_metric_fields(
+            &metric.key,
+            metric.critical_below,
+            metric.warn_below,
+            metric.warn_above,
+            metric.critical_above,
+        ) || metric
+            .offset
+            .checked_add(metric.value_type.width())
+            .is_none()
     });
     if !valid_posix_shm_name(path)
         || metrics.is_empty()
@@ -883,15 +898,45 @@ fn validate_metrics_shm(
     Ok(())
 }
 
-fn invalid_metric_fields(key: &str, warn_above: Option<f64>, critical_above: Option<f64>) -> bool {
+fn invalid_metric_fields(
+    key: &str,
+    critical_below: Option<f64>,
+    warn_below: Option<f64>,
+    warn_above: Option<f64>,
+    critical_above: Option<f64>,
+) -> bool {
     key.is_empty()
         || key.len() > 128
-        || warn_above.is_some_and(|value| !value.is_finite())
-        || critical_above.is_some_and(|value| !value.is_finite())
+        || [critical_below, warn_below, warn_above, critical_above]
+            .into_iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        || matches!(
+            (critical_below, warn_below),
+            (Some(critical), Some(warn)) if critical >= warn
+        )
         || matches!(
             (warn_above, critical_above),
             (Some(warn), Some(critical)) if warn >= critical
         )
+        || lower_and_upper_overlap(critical_below, warn_below, warn_above, critical_above)
+}
+
+fn lower_and_upper_overlap(
+    critical_below: Option<f64>,
+    warn_below: Option<f64>,
+    warn_above: Option<f64>,
+    critical_above: Option<f64>,
+) -> bool {
+    [critical_below, warn_below]
+        .into_iter()
+        .flatten()
+        .any(|lower| {
+            [warn_above, critical_above]
+                .into_iter()
+                .flatten()
+                .any(|upper| lower >= upper)
+        })
 }
 
 fn valid_posix_shm_name(path: &str) -> bool {

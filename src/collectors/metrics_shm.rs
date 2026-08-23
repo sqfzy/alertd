@@ -90,6 +90,8 @@ fn read_metric(
         &metric.key,
         rendered,
         number,
+        metric.critical_below,
+        metric.warn_below,
         metric.warn_above,
         metric.critical_above,
     ))
@@ -229,7 +231,7 @@ type = "metrics_shm"
 path = "/market-metrics"
 abi_hash = { offset = 0, expected_hex = "27C6096D" }
 metrics = [
-  { key = "latest", offset = 8, value_type = "u64" },
+  { key = "latest", offset = 8, value_type = "u64", critical_below = 5, warn_below = 10 },
   { key = "p99", offset = 16, value_type = "f64", warn_above = 80, critical_above = 120 },
   { key = "depth", offset = 24, value_type = "i32", endian = "big", critical_above = 1000 },
 ]
@@ -280,6 +282,30 @@ metrics = [
             observation.details["指标"],
             "latest=17\np99=120.5\ndepth=1000"
         );
+    }
+
+    #[test]
+    fn lower_thresholds_flow_through_shm_collection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut bytes = fixture();
+        bytes[8..16].copy_from_slice(&10_u64.to_le_bytes());
+        bytes[16..24].copy_from_slice(&50_f64.to_le_bytes());
+        bytes[24..28].copy_from_slice(&0_i32.to_be_bytes());
+        fs::write(temporary.path().join("market-metrics"), bytes).unwrap();
+        let check = check();
+        let (abi_hash, metrics) = contract(&check);
+        let context = CollectContext {
+            shm_root: Some(temporary.path().into()),
+            ..Default::default()
+        };
+
+        let observation = collect(&check, "/market-metrics", abi_hash, metrics, &context).unwrap();
+
+        assert_eq!(
+            observation.status,
+            ObservationStatus::Unhealthy(Severity::Warn)
+        );
+        assert!(observation.summary.contains("latest=10（≤ WARN 下限 10）"));
     }
 
     #[test]
@@ -426,6 +452,8 @@ metrics = [
             offset: 0,
             value_type: ShmValueType::U64,
             endian: Endian::Little,
+            critical_below: None,
+            warn_below: None,
             warn_above: None,
             critical_above: None,
         };
@@ -458,6 +486,8 @@ metrics = [
             offset: 0,
             value_type: ShmValueType::U64,
             endian: Endian::Little,
+            critical_below: None,
+            warn_below: None,
             warn_above: None,
             critical_above: None,
         };
