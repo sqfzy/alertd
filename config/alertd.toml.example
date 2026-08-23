@@ -100,6 +100,21 @@ stale_after = "120s"
 minimum_size_bytes = 384
 
 [[checks]]
+name = "market-latency"
+type = "metrics_file"
+# 绝对路径；生产者必须用同目录临时文件原子 rename 覆盖 JSON 快照。
+path = "/run/market/latency.metrics.json"
+# 快照 mtime 新鲜度：采样周期..=24h；JSON 顶层对象最大 64 KiB。
+stale_after = "90s"
+# 1..=64 个唯一 key；阈值为有限数，达到即越线，双阈值须 warn < critical。
+metrics = [
+  { key = "latency_latest_us" },
+  { key = "latency_p99_us", warn_above = 80, critical_above = 120 },
+  { key = "latency_max_us", critical_above = 500 },
+  { key = "samples" },
+]
+
+[[checks]]
 name = "data-disk"
 type = "disk"
 # mount 必须为绝对路径；容量和 inode 分别分级后取较高严重度。

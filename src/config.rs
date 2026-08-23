@@ -234,6 +234,11 @@ pub enum CheckKind {
         #[serde(default = "default_minimum_size_bytes")]
         minimum_size_bytes: u64,
     },
+    MetricsFile {
+        path: PathBuf,
+        stale_after: String,
+        metrics: Vec<MetricRule>,
+    },
     Disk {
         mount: PathBuf,
         warn_used_pct: f64,
@@ -299,6 +304,14 @@ pub enum Endian {
 pub struct JournalRule {
     pub contains: String,
     pub severity: Severity,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MetricRule {
+    pub key: String,
+    pub warn_above: Option<f64>,
+    pub critical_above: Option<f64>,
 }
 
 #[derive(Debug, Error)]
@@ -646,6 +659,20 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
             )?;
             Ok(())
         }
+        CheckKind::MetricsFile {
+            path,
+            stale_after,
+            metrics,
+        } => {
+            validate_metric_rules(check, path.is_absolute(), metrics)?;
+            duration_range(
+                "checks.metrics_file.stale_after",
+                stale_after,
+                interval,
+                Duration::from_secs(86_400),
+            )?;
+            Ok(())
+        }
         CheckKind::Disk {
             mount,
             warn_used_pct,
@@ -734,6 +761,39 @@ fn valid_upper_thresholds(warn: f64, critical: f64) -> bool {
 
 fn valid_rate_thresholds(warn: f64, critical: f64) -> bool {
     warn.is_finite() && critical.is_finite() && warn >= 0.0 && warn < critical
+}
+
+fn validate_metric_rules(
+    check: &CheckConfig,
+    valid_path: bool,
+    metrics: &[MetricRule],
+) -> Result<(), ConfigError> {
+    let unique: HashSet<_> = metrics.iter().map(|metric| &metric.key).collect();
+    if !valid_path
+        || metrics.is_empty()
+        || metrics.len() > 64
+        || unique.len() != metrics.len()
+        || metrics.iter().any(invalid_metric_rule)
+    {
+        return Err(ConfigError::Invalid(format!(
+            "check {} has invalid metrics path, keys, or thresholds",
+            check.name
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_metric_rule(metric: &MetricRule) -> bool {
+    metric.key.is_empty()
+        || metric.key.len() > 128
+        || metric.warn_above.is_some_and(|value| !value.is_finite())
+        || metric
+            .critical_above
+            .is_some_and(|value| !value.is_finite())
+        || matches!(
+            (metric.warn_above, metric.critical_above),
+            (Some(warn), Some(critical)) if warn >= critical
+        )
 }
 
 pub fn resolve_dingtalk_credentials(

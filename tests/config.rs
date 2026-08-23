@@ -26,7 +26,7 @@ fn complete_example_matches_strict_schema() {
 
     let config = config::load_config(&path).expect("complete example must remain valid");
 
-    assert_eq!(config.checks.len(), 11);
+    assert_eq!(config.checks.len(), 12);
 }
 
 #[test]
@@ -134,6 +134,59 @@ rules = [{ contains = "ERROR", severity = "critical" }]
     let empty_filter: Config =
         toml::from_str(&text.replace("expected during shutdown", "")).unwrap();
     assert!(config::validate_config(&empty_filter).is_err());
+}
+
+#[test]
+fn validates_metrics_file_contract() {
+    let text = r#"
+[runtime]
+interval = "10s"
+
+[[checks]]
+name = "latency"
+type = "metrics_file"
+path = "/run/market/latency.metrics.json"
+stale_after = "30s"
+metrics = [
+  { key = "latest" },
+  { key = "p99", warn_above = 80, critical_above = 120 },
+  { key = "max", critical_above = 500 },
+]
+"#;
+    let config: Config = toml::from_str(text).unwrap();
+    config::validate_config(&config).unwrap();
+
+    for invalid in [
+        text.replace("/run/market/latency.metrics.json", "relative.json"),
+        text.replace("stale_after = \"30s\"", "stale_after = \"5s\""),
+        text.replace(
+            "{ key = \"max\", critical_above = 500 },",
+            "{ key = \"p99\" },",
+        ),
+        text.replace("warn_above = 80", "warn_above = 120"),
+        text.replace("warn_above = 80", "warn_above = nan"),
+        text.replace("{ key = \"latest\" },", "{ key = \"\" },"),
+        text.replace(
+            "{ key = \"latest\" },",
+            &format!("{{ key = \"{}\" }},", "x".repeat(129)),
+        ),
+    ] {
+        let config: Config = toml::from_str(&invalid).unwrap();
+        assert!(config::validate_config(&config).is_err());
+    }
+
+    let empty = text.replace(
+        "metrics = [\n  { key = \"latest\" },\n  { key = \"p99\", warn_above = 80, critical_above = 120 },\n  { key = \"max\", critical_above = 500 },\n]",
+        "metrics = []",
+    );
+    assert!(config::validate_config(&toml::from_str(&empty).unwrap()).is_err());
+    assert!(
+        toml::from_str::<Config>(&text.replace(
+            "{ key = \"latest\" },",
+            "{ key = \"latest\", unknown = 1 },"
+        ))
+        .is_err()
+    );
 }
 
 #[test]
