@@ -105,6 +105,7 @@ pub fn format_daily(
     let mut cpu_rows = None;
     let mut applications = (0, 0);
     let mut data_chain = (0, 0);
+    let mut business_metrics = Vec::new();
     let mut platform = Vec::new();
     let mut journal_warn = 0_u64;
     let mut journal_critical = 0_u64;
@@ -128,6 +129,9 @@ pub fn format_daily(
             CheckKind::Shm { .. } | CheckKind::LatestFile { .. } => {
                 data_chain.1 += 1;
                 data_chain.0 += usize::from(observation.is_some_and(is_healthy));
+            }
+            CheckKind::MetricsFile { .. } | CheckKind::MetricsShm { .. } => {
+                business_metrics.push(format_metrics_report(check, observation));
             }
             CheckKind::Journal { .. } => {
                 if let Some(state) = states.get(&check.name) {
@@ -156,6 +160,9 @@ pub fn format_daily(
         "SHM/文件链路",
         &format!("{}/{} 正常", data_chain.0, data_chain.1),
     );
+    if !business_metrics.is_empty() {
+        push_field(&mut text, "业务指标", &business_metrics.join("\n"));
+    }
     push_field(
         &mut text,
         "日志 24h",
@@ -200,6 +207,18 @@ pub fn format_test(context: ReportContext<'_>) -> String {
 
 fn is_healthy(observation: &Observation) -> bool {
     matches!(observation.status, ObservationStatus::Healthy)
+}
+
+fn format_metrics_report(check: &CheckConfig, observation: Option<&Observation>) -> String {
+    let Some(observation) = observation else {
+        return format!("{}: 不可用", check.name);
+    };
+    let value = observation
+        .details
+        .get("指标")
+        .map(|metrics| metrics.replace('\n', " · "))
+        .unwrap_or_else(|| observation.summary.clone());
+    format!("{}: {value}", check.name)
 }
 
 fn push_field(text: &mut String, label: &str, value: &str) {

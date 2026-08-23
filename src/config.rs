@@ -234,6 +234,16 @@ pub enum CheckKind {
         #[serde(default = "default_minimum_size_bytes")]
         minimum_size_bytes: u64,
     },
+    MetricsFile {
+        path: PathBuf,
+        stale_after: String,
+        metrics: Vec<MetricRule>,
+    },
+    MetricsShm {
+        path: String,
+        abi_hash: Option<ShmAbiHash>,
+        metrics: Vec<ShmMetricRule>,
+    },
     Disk {
         mount: PathBuf,
         warn_used_pct: f64,
@@ -287,9 +297,10 @@ pub enum ShmProbe {
     GconfV2,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Endian {
+    #[default]
     Little,
     Big,
 }
@@ -299,6 +310,59 @@ pub enum Endian {
 pub struct JournalRule {
     pub contains: String,
     pub severity: Severity,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MetricRule {
+    pub key: String,
+    pub warn_above: Option<f64>,
+    pub critical_above: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ShmAbiHash {
+    pub offset: u64,
+    pub expected_hex: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ShmMetricRule {
+    pub key: String,
+    pub offset: u64,
+    pub value_type: ShmValueType,
+    #[serde(default)]
+    pub endian: Endian,
+    pub warn_above: Option<f64>,
+    pub critical_above: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ShmValueType {
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+}
+
+impl ShmValueType {
+    pub const fn width(self) -> u64 {
+        match self {
+            Self::U8 | Self::I8 => 1,
+            Self::U16 | Self::I16 => 2,
+            Self::U32 | Self::I32 | Self::F32 => 4,
+            Self::U64 | Self::I64 | Self::F64 => 8,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -646,6 +710,25 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
             )?;
             Ok(())
         }
+        CheckKind::MetricsFile {
+            path,
+            stale_after,
+            metrics,
+        } => {
+            validate_metric_rules(check, path.is_absolute(), metrics)?;
+            duration_range(
+                "checks.metrics_file.stale_after",
+                stale_after,
+                interval,
+                Duration::from_secs(86_400),
+            )?;
+            Ok(())
+        }
+        CheckKind::MetricsShm {
+            path,
+            abi_hash,
+            metrics,
+        } => validate_metrics_shm(check, path, abi_hash.as_ref(), metrics),
         CheckKind::Disk {
             mount,
             warn_used_pct,
@@ -734,6 +817,89 @@ fn valid_upper_thresholds(warn: f64, critical: f64) -> bool {
 
 fn valid_rate_thresholds(warn: f64, critical: f64) -> bool {
     warn.is_finite() && critical.is_finite() && warn >= 0.0 && warn < critical
+}
+
+fn validate_metric_rules(
+    check: &CheckConfig,
+    valid_path: bool,
+    metrics: &[MetricRule],
+) -> Result<(), ConfigError> {
+    let unique: HashSet<_> = metrics.iter().map(|metric| &metric.key).collect();
+    if !valid_path
+        || metrics.is_empty()
+        || metrics.len() > 64
+        || unique.len() != metrics.len()
+        || metrics.iter().any(|metric| {
+            invalid_metric_fields(&metric.key, metric.warn_above, metric.critical_above)
+        })
+    {
+        return Err(ConfigError::Invalid(format!(
+            "check {} has invalid metrics path, keys, or thresholds",
+            check.name
+        )));
+    }
+    Ok(())
+}
+
+fn validate_metrics_shm(
+    check: &CheckConfig,
+    path: &str,
+    abi_hash: Option<&ShmAbiHash>,
+    metrics: &[ShmMetricRule],
+) -> Result<(), ConfigError> {
+    let unique: HashSet<_> = metrics.iter().map(|metric| &metric.key).collect();
+    let invalid_abi = abi_hash.is_some_and(|abi| {
+        abi.expected_hex.len() < 2
+            || abi.expected_hex.len() > 128
+            || abi.expected_hex.len() % 2 != 0
+            || !abi
+                .expected_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || abi
+                .offset
+                .checked_add((abi.expected_hex.len() / 2) as u64)
+                .is_none()
+    });
+    let invalid_metric = metrics.iter().any(|metric| {
+        invalid_metric_fields(&metric.key, metric.warn_above, metric.critical_above)
+            || metric
+                .offset
+                .checked_add(metric.value_type.width())
+                .is_none()
+    });
+    if !valid_posix_shm_name(path)
+        || metrics.is_empty()
+        || metrics.len() > 64
+        || unique.len() != metrics.len()
+        || invalid_abi
+        || invalid_metric
+    {
+        return Err(ConfigError::Invalid(format!(
+            "check {} has invalid metrics_shm path, ABI hash, metrics, or thresholds",
+            check.name
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_metric_fields(key: &str, warn_above: Option<f64>, critical_above: Option<f64>) -> bool {
+    key.is_empty()
+        || key.len() > 128
+        || warn_above.is_some_and(|value| !value.is_finite())
+        || critical_above.is_some_and(|value| !value.is_finite())
+        || matches!(
+            (warn_above, critical_above),
+            (Some(warn), Some(critical)) if warn >= critical
+        )
+}
+
+fn valid_posix_shm_name(path: &str) -> bool {
+    path.len() > 1
+        && path.len() <= 255
+        && path.starts_with('/')
+        && !path[1..].contains('/')
+        && !path.contains('\0')
 }
 
 pub fn resolve_dingtalk_credentials(

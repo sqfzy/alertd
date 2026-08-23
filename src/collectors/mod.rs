@@ -2,6 +2,9 @@ pub mod disk;
 pub mod journal;
 pub mod latest_file;
 pub mod memory;
+mod metrics;
+pub mod metrics_file;
+pub mod metrics_shm;
 pub mod network;
 pub mod process;
 pub mod shm;
@@ -95,6 +98,16 @@ pub fn collect(
             stale_after,
             *minimum_size_bytes,
         ),
+        CheckKind::MetricsFile {
+            path,
+            stale_after,
+            metrics,
+        } => metrics_file::collect(check, path, stale_after, metrics),
+        CheckKind::MetricsShm {
+            path,
+            abi_hash,
+            metrics,
+        } => metrics_shm::collect(check, path, abi_hash.as_ref(), metrics, context),
         CheckKind::Disk {
             mount,
             warn_used_pct,

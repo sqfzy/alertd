@@ -18,6 +18,10 @@ Collector → Observation → Alarm Engine → AlertEvent → Durable Queue → 
 - 报告层把事件格式化为易读文本，持久队列接受后才算完成本地交付。
 - 钉钉 worker 独立重试，不阻塞采集循环。
 
+`metrics_file` 与 `metrics_shm` 共用数值阈值和展示逻辑，但保留各自明确的数据边界：前者读取生产者原子替换的 JSON 快照，适合跨字段一致的聚合结果；后者只从一次打开的 SHM 文件描述符定点读取 ABI 与配置字段，适合低成本单值采样。两者都不保存历史或自行计算聚合窗口。
+
+SHM 数值读取不引入业务 ABI parser 或 seqlock。生产者负责用自然对齐的原子写更新每个字段；单轮多个字段可能来自不同写入时刻。路径在读取期间被替换时，已打开文件描述符保证本轮不会混合两个 inode。ABI mismatch 会跳过后续数值读取并作为对象异常进入统一状态机；权限、短读、越界或非法浮点则属于 collector failure。
+
 主要实现位于 `src/collectors/`、`src/model.rs`、`src/alarm.rs`、`src/report.rs`、`src/delivery/queue.rs` 和 `src/delivery/dingtalk.rs`。
 
 ## 状态型告警

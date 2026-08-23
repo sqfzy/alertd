@@ -124,6 +124,8 @@ systemctl show alertd -p ActiveState -p SubState -p NRestarts -p WatchdogTimesta
 5. 检查 `spool/quarantine/`；隔离文件不会自动重新投递。
 6. 对 journal check，用源服务的 `journalctl -u <unit>` 核对原文、过滤子串和 cursor 行为。
 7. 对主机 check，直接检查对应 `/proc`、`/sys`、挂载点、`systemctl show` 或 `chronyc -c tracking`。
+8. 对 `metrics_file`，检查文件大小、mtime、JSON 顶层对象和配置 key；生产者应以原子 rename 更新。
+9. 对 `metrics_shm`，先核对 `/dev/shm/<name>` 的权限与大小，再按配置 offset、类型、字节序和可选 ABI 原始字节检查生产者布局。ABI 不匹配是对象异常；短读、越界和非法浮点会进入采集盲区路径。
 
 ## 安全停止、升级与回滚
 
