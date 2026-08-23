@@ -126,10 +126,9 @@ metrics = [
 
 [[checks]]
 name = "unavailable-metrics"
-type = "metrics_file"
-path = "/run/market/unavailable.json"
-stale_after = "90s"
-metrics = [{ key = "value" }]
+type = "metrics_shm"
+path = "/unavailable-metrics"
+metrics = [{ key = "value", offset = 0, value_type = "u64" }]
 "#,
     )
     .unwrap();

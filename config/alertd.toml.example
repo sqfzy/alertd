@@ -115,6 +115,21 @@ metrics = [
 ]
 
 [[checks]]
+name = "market-latency-shm"
+type = "metrics_shm"
+# 合法 POSIX SHM 名；每轮只定点读取 ABI 与下列字段，不读取整个 SHM。
+path = "/shm_market_metrics"
+# 可选原始 ABI 字节；2..=128 个十六进制字符、偶数长度，不区分大小写。
+abi_hash = { offset = 0, expected_hex = "27c6096d9b907b82" }
+# 1..=64 个唯一 key；offset 为 u64，endian 默认 little，也可为 big。
+# value_type 支持 u8/u16/u32/u64/i8/i16/i32/i64/f32/f64。
+metrics = [
+  { key = "latency_latest_us", offset = 64, value_type = "u64" },
+  { key = "latency_p99_us", offset = 72, value_type = "f64", warn_above = 80, critical_above = 120 },
+  { key = "queue_depth", offset = 80, value_type = "i32", endian = "big", critical_above = 1000 },
+]
+
+[[checks]]
 name = "data-disk"
 type = "disk"
 # mount 必须为绝对路径；容量和 inode 分别分级后取较高严重度。

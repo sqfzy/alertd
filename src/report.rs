@@ -130,7 +130,7 @@ pub fn format_daily(
                 data_chain.1 += 1;
                 data_chain.0 += usize::from(observation.is_some_and(is_healthy));
             }
-            CheckKind::MetricsFile { .. } => {
+            CheckKind::MetricsFile { .. } | CheckKind::MetricsShm { .. } => {
                 business_metrics.push(format_metrics_report(check, observation));
             }
             CheckKind::Journal { .. } => {

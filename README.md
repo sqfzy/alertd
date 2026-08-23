@@ -66,6 +66,7 @@ journalctl -u alertd -n 200 --no-pager
 - `systemd`：检查一组 service/timer 的 loaded、active 状态。
 - `latest_file`：检查匹配文件的大小和 mtime 新鲜度。
 - `metrics_file`：读取原子覆盖的 JSON 数值快照，检查新鲜度和可选上限阈值，并纳入日报。
+- `metrics_shm`：可选校验 ABI 原始字节，定点读取固定类型数值，检查上限阈值并纳入日报。
 - `disk`：检查挂载点容量与 inode 使用率。
 - `memory`：按 `MemAvailable/MemTotal` 检查可用内存。
 - `cpu`：连续采样并显示每个逻辑 CPU 的使用率。
@@ -76,6 +77,8 @@ journalctl -u alertd -n 200 --no-pager
 所有 collector 只采集事实。统一告警状态机负责等待、升级、重复和恢复防抖；collector 连续失败会产生独立的采集盲区告警。
 
 `metrics_file` 的生产者负责聚合业务数据，并以“同目录临时文件 + 原子 rename”更新不超过 64 KiB 的顶层 JSON 对象。alertd 只读取配置选中的有限数值，不保存历史或计算 average/max/p99；统计窗口和单位应体现在稳定的 key 名中。
+
+`metrics_shm` 按 `runtime.interval` 打开 POSIX SHM 一次，通过同一文件描述符读取可选 ABI hash 和配置字段；支持大小端整数与浮点数。生产者必须以自然对齐的原子写更新单个字段。alertd 提供单值最佳努力采样，不保证多个字段属于同一事务；需要跨字段一致性时使用原子 JSON 快照，或另行设计 seqlock。
 
 ## 文件组织
 

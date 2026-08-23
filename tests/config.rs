@@ -26,7 +26,7 @@ fn complete_example_matches_strict_schema() {
 
     let config = config::load_config(&path).expect("complete example must remain valid");
 
-    assert_eq!(config.checks.len(), 12);
+    assert_eq!(config.checks.len(), 13);
 }
 
 #[test]
@@ -184,6 +184,84 @@ metrics = [
         toml::from_str::<Config>(&text.replace(
             "{ key = \"latest\" },",
             "{ key = \"latest\", unknown = 1 },"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn validates_metrics_shm_contract() {
+    let text = r#"
+[[checks]]
+name = "latency-shm"
+type = "metrics_shm"
+path = "/market-metrics"
+abi_hash = { offset = 0, expected_hex = "27c6096D" }
+metrics = [
+  { key = "u8", offset = 8, value_type = "u8" },
+  { key = "u16", offset = 16, value_type = "u16", endian = "big" },
+  { key = "u32", offset = 24, value_type = "u32" },
+  { key = "u64", offset = 32, value_type = "u64" },
+  { key = "i8", offset = 40, value_type = "i8" },
+  { key = "i16", offset = 48, value_type = "i16" },
+  { key = "i32", offset = 56, value_type = "i32", critical_above = 1000 },
+  { key = "i64", offset = 64, value_type = "i64" },
+  { key = "f32", offset = 72, value_type = "f32" },
+  { key = "f64", offset = 80, value_type = "f64", warn_above = 80, critical_above = 120 },
+]
+"#;
+    let config: Config = toml::from_str(text).unwrap();
+    config::validate_config(&config).unwrap();
+    let config::CheckKind::MetricsShm { metrics, .. } = &config.checks[0].kind else {
+        panic!("expected metrics_shm check");
+    };
+    assert_eq!(metrics[0].endian, config::Endian::Little);
+    assert_eq!(metrics[1].endian, config::Endian::Big);
+
+    for invalid in [
+        text.replace("/market-metrics", "market-metrics"),
+        text.replace("/market-metrics", "/market/metrics"),
+        text.replace("27c6096D", ""),
+        text.replace("27c6096D", "abc"),
+        text.replace("27c6096D", "zz"),
+        text.replace("{ key = \"u16\"", "{ key = \"u8\""),
+        text.replace("warn_above = 80", "warn_above = 120"),
+        text.replace("critical_above = 1000", "critical_above = nan"),
+    ] {
+        let config: Config = toml::from_str(&invalid).unwrap();
+        assert!(
+            config::validate_config(&config).is_err(),
+            "accepted: {invalid}"
+        );
+    }
+
+    let no_abi = text.replace(
+        "abi_hash = { offset = 0, expected_hex = \"27c6096D\" }\n",
+        "",
+    );
+    config::validate_config(&toml::from_str(&no_abi).unwrap()).unwrap();
+
+    let mut overflowing_abi = config.clone();
+    let config::CheckKind::MetricsShm { abi_hash, .. } = &mut overflowing_abi.checks[0].kind else {
+        panic!("expected metrics_shm check");
+    };
+    abi_hash.as_mut().unwrap().offset = u64::MAX;
+    assert!(config::validate_config(&overflowing_abi).is_err());
+
+    let mut overflowing_metric = config.clone();
+    let config::CheckKind::MetricsShm { metrics, .. } = &mut overflowing_metric.checks[0].kind
+    else {
+        panic!("expected metrics_shm check");
+    };
+    metrics.last_mut().unwrap().offset = u64::MAX;
+    assert!(config::validate_config(&overflowing_metric).is_err());
+
+    let no_metrics = text.replace(&text[text.find("metrics = [").unwrap()..], "metrics = []\n");
+    assert!(config::validate_config(&toml::from_str(&no_metrics).unwrap()).is_err());
+    assert!(
+        toml::from_str::<Config>(&text.replace(
+            "{ key = \"u8\", offset = 8, value_type = \"u8\" },",
+            "{ key = \"u8\", offset = 8, value_type = \"u8\", unknown = true },"
         ))
         .is_err()
     );
