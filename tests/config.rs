@@ -190,6 +190,66 @@ metrics = [
 }
 
 #[test]
+fn validates_metric_lower_and_upper_ranges_for_both_sources() {
+    let text = r#"
+[[checks]]
+name = "file-ranges"
+type = "metrics_file"
+path = "/run/market/ranges.json"
+stale_after = "30s"
+metrics = [
+  { key = "report-only" },
+  { key = "warn-low", warn_below = -10 },
+  { key = "critical-low", critical_below = -20 },
+  { key = "warn-high", warn_above = 90 },
+  { key = "critical-high", critical_above = 100 },
+  { key = "full", critical_below = 5, warn_below = 10, warn_above = 90, critical_above = 100 },
+]
+
+[[checks]]
+name = "shm-ranges"
+type = "metrics_shm"
+path = "/market-ranges"
+metrics = [
+  { key = "full", offset = 0, value_type = "f64", critical_below = 5, warn_below = 10, warn_above = 90, critical_above = 100 },
+]
+"#;
+    let config: Config = toml::from_str(text).unwrap();
+    config::validate_config(&config).unwrap();
+
+    for invalid in [
+        text.replace(
+            "critical_below = 5, warn_below = 10",
+            "critical_below = 10, warn_below = 10",
+        ),
+        text.replace(
+            "critical_below = 5, warn_below = 10",
+            "critical_below = 11, warn_below = 10",
+        ),
+        text.replace(
+            "warn_above = 90, critical_above = 100",
+            "warn_above = 100, critical_above = 100",
+        ),
+        text.replace(
+            "warn_above = 90, critical_above = 100",
+            "warn_above = 101, critical_above = 100",
+        ),
+        text.replace(
+            "warn_below = 10, warn_above = 90",
+            "warn_below = 90, warn_above = 90",
+        ),
+        text.replace("critical_below = 5", "critical_below = nan"),
+        text.replace("critical_below = 5", "critical_below = inf"),
+    ] {
+        let config: Config = toml::from_str(&invalid).unwrap();
+        assert!(
+            config::validate_config(&config).is_err(),
+            "accepted invalid metric range: {invalid}"
+        );
+    }
+}
+
+#[test]
 fn validates_metrics_shm_contract() {
     let text = r#"
 [[checks]]

@@ -106,6 +106,8 @@ fn read_metric(
         &metric.key,
         rendered,
         number,
+        metric.critical_below,
+        metric.warn_below,
         metric.warn_above,
         metric.critical_above,
     ))
@@ -161,6 +163,7 @@ path = "/tmp/metrics.json"
 stale_after = "1h"
 metrics = [
   { key = "latest" },
+  { key = "temperature", critical_below = 5, warn_below = 10, warn_above = 90, critical_above = 100 },
   { key = "p99", warn_above = 80, critical_above = 120 },
   { key = "max", critical_above = 500 },
 ]
@@ -183,7 +186,7 @@ metrics = [
         let path = temporary.path().join("metrics.json");
         fs::write(
             &path,
-            br#"{"latest":17,"p99":120,"max":700,"extra":"ignored"}"#,
+            br#"{"latest":17,"temperature":50,"p99":120,"max":700,"extra":"ignored"}"#,
         )
         .unwrap();
         let check = check();
@@ -194,17 +197,48 @@ metrics = [
         );
         assert!(observation.summary.contains("p99=120"));
         assert!(observation.summary.contains("max=700"));
-        assert_eq!(observation.details["指标"], "latest=17\np99=120\nmax=700");
+        assert_eq!(
+            observation.details["指标"],
+            "latest=17\ntemperature=50\np99=120\nmax=700"
+        );
     }
 
     #[test]
     fn report_only_metrics_do_not_alert() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("metrics.json");
-        fs::write(&path, br#"{"latest":999,"p99":79,"max":499}"#).unwrap();
+        fs::write(
+            &path,
+            br#"{"latest":999,"temperature":50,"p99":79,"max":499}"#,
+        )
+        .unwrap();
         let check = check();
         let observation = collect(&check, &path, "1h", rules(&check)).unwrap();
         assert_eq!(observation.status, ObservationStatus::Healthy);
+    }
+
+    #[test]
+    fn lower_thresholds_flow_through_json_collection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("metrics.json");
+        fs::write(
+            &path,
+            br#"{"latest":1,"temperature":10,"p99":79,"max":499}"#,
+        )
+        .unwrap();
+        let check = check();
+
+        let observation = collect(&check, &path, "1h", rules(&check)).unwrap();
+
+        assert_eq!(
+            observation.status,
+            ObservationStatus::Unhealthy(Severity::Warn)
+        );
+        assert!(
+            observation
+                .summary
+                .contains("temperature=10（≤ WARN 下限 10）")
+        );
     }
 
     #[test]
@@ -213,7 +247,7 @@ metrics = [
         let path = temporary.path().join("metrics.json");
         let check = check();
         assert!(collect(&check, &path, "1h", rules(&check)).is_ok());
-        fs::write(&path, br#"{"latest":1,"p99":1,"max":1}"#).unwrap();
+        fs::write(&path, br#"{"latest":1,"temperature":50,"p99":1,"max":1}"#).unwrap();
         assert!(
             collect(&check, &path, "0s", rules(&check))
                 .unwrap()
@@ -237,13 +271,17 @@ metrics = [
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("metrics.json");
         let replacement = temporary.path().join("replacement.json");
-        fs::write(&path, br#"{"latest":1,"p99":2,"max":3}"#).unwrap();
+        fs::write(&path, br#"{"latest":1,"temperature":50,"p99":2,"max":3}"#).unwrap();
         let opened = File::open(&path).unwrap();
-        fs::write(&replacement, br#"{"latest":4,"p99":5,"max":6}"#).unwrap();
+        fs::write(
+            &replacement,
+            br#"{"latest":4,"temperature":50,"p99":5,"max":6}"#,
+        )
+        .unwrap();
         fs::rename(&replacement, &path).unwrap();
         let check = check();
         let values = read_metrics(opened, rules(&check)).unwrap();
         assert_eq!(values[0].rendered, "1");
-        assert_eq!(values[1].rendered, "2");
+        assert_eq!(values[1].rendered, "50");
     }
 }

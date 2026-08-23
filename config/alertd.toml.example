@@ -106,11 +106,13 @@ type = "metrics_file"
 path = "/run/market/latency.metrics.json"
 # 快照 mtime 新鲜度：采样周期..=24h；JSON 顶层对象最大 64 KiB。
 stale_after = "90s"
-# 1..=64 个唯一 key；阈值为有限数，达到即越线，双阈值须 warn < critical。
+# 1..=64 个唯一 key；阈值为有限数，达到上下边界即越线。
+# 下限须 critical_below < warn_below，上限须 warn_above < critical_above；区间不得重叠。
 metrics = [
   { key = "latency_latest_us" },
   { key = "latency_p99_us", warn_above = 80, critical_above = 120 },
   { key = "latency_max_us", critical_above = 500 },
+  { key = "temperature_c", critical_below = 5, warn_below = 10, warn_above = 90, critical_above = 100 },
   { key = "samples" },
 ]
 
@@ -123,10 +125,12 @@ path = "/shm_market_metrics"
 abi_hash = { offset = 0, expected_hex = "27c6096d9b907b82" }
 # 1..=64 个唯一 key；offset 为 u64，endian 默认 little，也可为 big。
 # value_type 支持 u8/u16/u32/u64/i8/i16/i32/i64/f32/f64。
+# 数值阈值与 metrics_file 相同，支持独立下限、上限或完整健康区间。
 metrics = [
   { key = "latency_latest_us", offset = 64, value_type = "u64" },
   { key = "latency_p99_us", offset = 72, value_type = "f64", warn_above = 80, critical_above = 120 },
   { key = "queue_depth", offset = 80, value_type = "i32", endian = "big", critical_above = 1000 },
+  { key = "feed_health_pct", offset = 88, value_type = "f64", critical_below = 90, warn_below = 95 },
 ]
 
 [[checks]]
