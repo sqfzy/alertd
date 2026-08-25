@@ -17,11 +17,14 @@ pub struct ReportContext<'a> {
 }
 
 pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
+    if event.transition == Transition::Event {
+        return format_journal_event(context, event);
+    }
     let (icon, transition) = match event.transition {
         Transition::Firing => (severity_icon(event.severity), "告警"),
         Transition::Repeating => (severity_icon(event.severity), "持续"),
         Transition::Resolved => ("🟢", "恢复"),
-        Transition::Event => (severity_icon(event.severity), "事件"),
+        Transition::Event => unreachable!("journal events use their dedicated formatter"),
     };
     let mut text = format!("{icon} **{} · {transition}**", event.severity.label());
     push_field(&mut text, "主机", context.host);
@@ -31,14 +34,9 @@ pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
     push_identity(&mut text, context);
     push_field(&mut text, "检查", &event.check_name);
     push_field(&mut text, "状态", &event.summary);
-    let time_label = if event.transition == Transition::Event {
-        "发生时间"
-    } else {
-        "异常开始"
-    };
     push_field(
         &mut text,
-        time_label,
+        "异常开始",
         &event
             .started_at
             .with_timezone(&Local)
@@ -72,6 +70,91 @@ pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
     text
 }
 
+fn format_journal_event(context: ReportContext<'_>, event: &AlertEvent) -> String {
+    let mut text = format!(
+        "{} **{} · 日志告警**",
+        severity_icon(event.severity),
+        event.severity.label()
+    );
+    push_field(&mut text, "主机", context.host);
+    if let Some(ip) = context.ip {
+        push_field(&mut text, "IP", ip);
+    }
+    push_field(
+        &mut text,
+        "服务",
+        event
+            .details
+            .get("服务")
+            .map(String::as_str)
+            .unwrap_or("未知"),
+    );
+    push_field(
+        &mut text,
+        "命中规则",
+        event
+            .details
+            .get("命中规则")
+            .map(String::as_str)
+            .unwrap_or("未知"),
+    );
+    let (time_label, occurred_at) = journal_event_time(event);
+    push_field(&mut text, time_label, &occurred_at);
+    if let Some(sample) = event.details.get("日志").filter(|value| !value.is_empty()) {
+        push_quote_field(&mut text, "日志", sample);
+    }
+    push_field(&mut text, "统计", &journal_event_statistics(event));
+    push_field(&mut text, "检查", &event.check_name);
+    if let Some(runbook) = &event.runbook {
+        push_field(&mut text, "处理", runbook);
+    }
+    push_identity(&mut text, context);
+    text
+}
+
+fn journal_event_time(event: &AlertEvent) -> (&'static str, String) {
+    if let Some(occurred_at) = event
+        .details
+        .get("日志时间")
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    {
+        return (
+            "日志时间",
+            occurred_at
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string(),
+        );
+    }
+    (
+        "发现时间",
+        event
+            .started_at
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S%.3f")
+            .to_string(),
+    )
+}
+
+fn journal_event_statistics(event: &AlertEvent) -> String {
+    let read = event
+        .details
+        .get("本批读取")
+        .map(String::as_str)
+        .unwrap_or("0");
+    let hits = event
+        .details
+        .get("本次命中")
+        .map(String::as_str)
+        .unwrap_or("0");
+    let window = event
+        .details
+        .get("窗口累计")
+        .map(String::as_str)
+        .unwrap_or(hits);
+    format!("本批读取 {read} 行，规则命中 {hits} 次；窗口累计 {window} 次")
+}
+
 pub fn format_daily(
     context: ReportContext<'_>,
     checks: &[CheckConfig],
@@ -102,6 +185,7 @@ pub fn format_daily(
     );
 
     let mut resources = Vec::new();
+    let mut resource_checks = 0_usize;
     let mut cpu_rows = None;
     let mut applications = (0, 0);
     let mut data_chain = (0, 0);
@@ -109,17 +193,21 @@ pub fn format_daily(
     let mut platform = Vec::new();
     let mut journal_warn = 0_u64;
     let mut journal_critical = 0_u64;
+    let mut journal_checks = 0_usize;
     for check in checks.iter().filter(|check| check.enabled) {
         let observation = observations
             .iter()
             .find(|item| item.check_name == check.name);
         match &check.kind {
             CheckKind::Cpu { .. } | CheckKind::Memory { .. } | CheckKind::Disk { .. } => {
+                resource_checks += 1;
                 if let Some(item) = observation {
                     resources.push(format!("{}: {}", check.name, item.summary));
                     if matches!(check.kind, CheckKind::Cpu { .. }) {
                         cpu_rows = item.details.get("每核").cloned();
                     }
+                } else {
+                    resources.push(format_unavailable_check(check, observations));
                 }
             }
             CheckKind::Process { .. } | CheckKind::Systemd { .. } => {
@@ -134,42 +222,54 @@ pub fn format_daily(
                 business_metrics.push(format_metrics_report(check, observation));
             }
             CheckKind::Journal { .. } => {
+                journal_checks += 1;
                 if let Some(state) = states.get(&check.name) {
                     journal_warn = journal_warn.saturating_add(state.daily_warn_count);
                     journal_critical = journal_critical.saturating_add(state.daily_critical_count);
                 }
             }
             CheckKind::TimeSync { .. } | CheckKind::Network { .. } | CheckKind::SystemTuning => {
-                if let Some(item) = observation {
-                    platform.push(format!("{}: {}", check.name, item.summary));
-                }
+                platform.push(match observation {
+                    Some(item) => format!("{}: {}", check.name, item.summary),
+                    None => format_unavailable_check(check, observations),
+                });
             }
         }
     }
-    push_field(&mut text, "主机资源", &resources.join("\n"));
+    if resource_checks > 0 {
+        push_field(&mut text, "主机资源", &resources.join("\n"));
+    }
     if let Some(rows) = cpu_rows {
         push_field(&mut text, "每核 CPU", &rows);
     }
-    push_field(
-        &mut text,
-        "进程/systemd",
-        &format!("{}/{} 正常", applications.0, applications.1),
-    );
-    push_field(
-        &mut text,
-        "SHM/文件链路",
-        &format!("{}/{} 正常", data_chain.0, data_chain.1),
-    );
+    if applications.1 > 0 {
+        push_field(
+            &mut text,
+            "进程/systemd",
+            &format!("{}/{} 正常", applications.0, applications.1),
+        );
+    }
+    if data_chain.1 > 0 {
+        push_field(
+            &mut text,
+            "SHM/文件链路",
+            &format!("{}/{} 正常", data_chain.0, data_chain.1),
+        );
+    }
     if !business_metrics.is_empty() {
         push_field(&mut text, "业务指标", &business_metrics.join("\n"));
     }
-    push_field(
-        &mut text,
-        "日志 24h",
-        &format!("WARN {journal_warn}，ERROR {journal_critical}"),
-    );
-    push_field(&mut text, "时钟/调优/网络", &platform.join("\n"));
-    push_field(&mut text, "投递队列", &queue_pending.to_string());
+    if journal_checks > 0 {
+        push_field(
+            &mut text,
+            "日志 24h",
+            &format!("WARN {journal_warn}，ERROR {journal_critical}"),
+        );
+    }
+    if !platform.is_empty() {
+        push_field(&mut text, "时钟/调优/网络", &platform.join("\n"));
+    }
+    push_field(&mut text, "投递队列", &format!("待发送 {queue_pending} 条"));
     text
 }
 
@@ -221,8 +321,36 @@ fn format_metrics_report(check: &CheckConfig, observation: Option<&Observation>)
     format!("{}: {value}", check.name)
 }
 
+fn format_unavailable_check(check: &CheckConfig, observations: &[Observation]) -> String {
+    let collector_name = format!("{}/collector", check.name);
+    let reason = observations
+        .iter()
+        .find(|item| item.check_name == collector_name)
+        .map(unavailable_reason)
+        .unwrap_or_else(|| "无本轮数据".into());
+    format!("{}: 采集不可用（{reason}）", check.name)
+}
+
+fn unavailable_reason(observation: &Observation) -> String {
+    observation
+        .details
+        .get("错误")
+        .cloned()
+        .unwrap_or_else(|| observation.summary.clone())
+}
+
 fn push_field(text: &mut String, label: &str, value: &str) {
     text.push_str(&format!("\n\n**{label}：** {value}"));
+}
+
+fn push_quote_field(text: &mut String, label: &str, value: &str) {
+    text.push_str(&format!("\n\n**{label}：**\n"));
+    for line in value.lines() {
+        text.push_str("> ");
+        text.push_str(line);
+        text.push('\n');
+    }
+    text.pop();
 }
 
 fn push_identity(text: &mut String, context: ReportContext<'_>) {
