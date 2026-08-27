@@ -105,6 +105,8 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub host: Option<String>,
     pub ip: Option<String>,
     #[serde(default = "default_interval")]
@@ -119,6 +121,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             host: None,
             ip: None,
             interval: default_interval(),

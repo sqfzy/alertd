@@ -52,13 +52,13 @@ sha256sum /etc/alertd/alertd.toml
 
 ```sh
 alertd --config /etc/alertd/alertd.toml --check-config
-systemctl kill -s HUP alertd
+systemctl reload alertd
 journalctl -u alertd -n 50 --no-pager
 ```
 
 允许热更新：
 
-- `runtime.host`、`runtime.ip`、`runtime.interval`
+- `runtime.enabled`、`runtime.host`、`runtime.ip`、`runtime.interval`
 - 全部 alarm policy 与日报时间
 - checks 的增加、删除和修改
 
@@ -71,30 +71,23 @@ journalctl -u alertd -n 50 --no-pager
 
 禁止项涉及启动期资源或 worker 生命周期，需要通过安全重启生效。任何解析、校验或边界检查失败都会保留旧配置并记录 ERROR，同时尝试发送内部 WARN。
 
-## 维护窗口
+## 全局监控开关
 
-标准顺序是先申请、确认 daemon 已进入维护，再停止业务：
-
-```sh
-alertd --config /etc/alertd/alertd.toml maintenance start \
-  --until '2026-08-21T16:00:00+08:00' \
-  --reason '业务重新部署'
-alertd --config /etc/alertd/alertd.toml maintenance status
-# status 显示 active 后再停止或更新业务服务
-```
-
-`--until` 是带时区的 RFC3339 绝对时间，至少晚于当前时间一分钟；`--reason` 为 1–256 字节且不能含控制字符。窗口最多在一个采样周期后生效。
-
-提前结束或检查状态：
+业务维护前先关闭监控并确认配置已经生效：
 
 ```sh
-alertd --config /etc/alertd/alertd.toml maintenance cancel
-alertd --config /etc/alertd/alertd.toml maintenance status
+# 在 [runtime] 中设置 enabled = false
+alertd --config /etc/alertd/alertd.toml --check-config
+systemctl reload alertd
+systemctl status alertd
+journalctl -u alertd -n 50 --no-pager
 ```
 
-`status` 可能显示：等待 daemon 确认、维护中、已取消或过期且等待结束通知、无窗口。`cancel` 幂等。重复 `start` 不会覆盖现有窗口。
+`systemctl status` 显示 `Monitoring disabled`，同时钉钉收到内部 WARN 后，再停止或更新业务。关闭后不运行 collector、告警判断和日报；daemon、watchdog、自监控和关闭前已入队消息的投递继续运行。
 
-维护期间已有队列消息和内部事件继续投递，collector 继续更新 cursor/基线，但 check 状态和日报不推进。窗口文件无效时系统 fail-open，恢复正常监控而不是保持静默。
+维护完成后将 `enabled` 改回 `true`，再次校验并执行 `systemctl reload alertd`。alertd 会清空旧告警和采样基线，从当前时间开始读取 journald，并发送一条内部 OK。关闭期间日志不会补报，关闭前异常也不会产生恢复消息。
+
+该开关没有结束时间或自动恢复能力。操作完成后必须人工开启；`--check-config` 只证明磁盘上的 TOML 合法，最终状态以 `systemctl status`、alertd INFO 日志和钉钉开关通知为准。
 
 ## 状态与排障入口
 
@@ -102,10 +95,11 @@ alertd --config /etc/alertd/alertd.toml maintenance status
 
 | 路径 | 用途 | 排障原则 |
 |---|---|---|
-| `state.json` | check 状态、journal cursor、日报与生命周期标记 | 不在线编辑；先停止服务并备份再处理 |
-| `maintenance.json` | 当前维护窗口 | 优先使用 maintenance CLI，不手工删除 |
+| `state.json` | check 状态、journal cursor、日报、开关通知与生命周期标记 | 不在线编辑；先停止服务并备份再处理 |
 | `spool/*.json` | 待投递消息 | 网络恢复后自动重试；不要批量删除 |
 | `spool/quarantine/` | 无法解析的队列文件 | 保留现场并结合 alertd ERROR 分析 |
+
+旧版本遗留的 `maintenance.json` 已不再读取，也不会影响 `runtime.enabled`；确认不再回滚到旧版本后可人工归档或删除。
 
 本地日志统一进入 journald：
 
@@ -119,7 +113,7 @@ systemctl show alertd -p ActiveState -p SubState -p NRestarts -p WatchdogTimesta
 
 1. 运行 `--check-config`，确认严格 schema 和范围校验通过。
 2. 查看 alertd unit 的 ERROR/WARN，确认不是 collector 命令超时或权限问题。
-3. 查看 `maintenance status`，排除仍在维护或等待结束通知。
+3. 查看 `runtime.enabled`、`systemctl status` 和最近一次热加载日志，确认监控没有被关闭。
 4. 统计 `spool/*.json`，确认是否为钉钉超时、429/5xx 或队列已满。
 5. 检查 `spool/quarantine/`；隔离文件不会自动重新投递。
 6. 对 journal check，用源服务的 `journalctl -u <unit>` 核对原文、过滤子串和 cursor 行为。
@@ -142,10 +136,14 @@ cp -a /usr/local/bin/alertd /usr/local/bin/alertd.rollback
 cp -a /etc/alertd/alertd.toml /etc/alertd/alertd.toml.rollback
 /path/to/new-alertd --config /etc/alertd/alertd.toml --check-config
 install -o root -g root -m 0755 /path/to/new-alertd /usr/local/bin/alertd
+install -o root -g root -m 0644 deploy/alertd.service /etc/systemd/system/alertd.service
+systemctl daemon-reload
 systemctl restart alertd
 systemctl status alertd
 journalctl -u alertd -n 100 --no-pager
 ```
+
+从维护窗口版本首次升级时必须同步更新 unit，旧 unit 没有 `ExecReload`。若 unit 尚未更新，可临时使用 `systemctl kill -s HUP alertd` 触发相同的配置热加载。
 
 若健康检查失败，停止服务，恢复已知正常的二进制和配置，再启动并核对日志。不要删除 `state_dir`：保留它才能继续使用原 journal cursor 和重试尚未发送的队列消息。若新旧版本的状态兼容性未知，应先复制整个 `state_dir`，再按发布说明处理。
 

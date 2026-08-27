@@ -63,22 +63,22 @@ journal check 是事件型，不把“本轮没有新日志”解释为恢复：
 
 普通 check 消息最多占 `queue_capacity - 1` 个槽。最后一个槽只供内部事件使用，使“队列接近或已满”等自监控在业务消息拥塞时仍有机会持久化。
 
-## 维护窗口
+## 全局监控开关
 
-维护窗口只抑制 check 告警，不暂停守护程序：
+`runtime.enabled=false` 关闭监控平面，而不退出 daemon：
 
-- Collector 继续执行，以更新 journal cursor 以及 CPU、network、SHM 的采样基线。
-- 成功或失败的采样都不修改 `CheckState`，维护期间的短暂异常不会留下触发或恢复事件。
-- 已入队消息、内部事件、投递 worker、热加载、状态保存和 watchdog 继续运行。
-- 日报不发送且不推进日期，窗口结束后的下一轮按原有到期规则补发。
+- 不运行 collector、Alarm Engine 或日报，也不读取和推进 journal cursor。
+- 已入队消息、内部自监控、投递 worker、热加载、状态保存和 watchdog 继续运行。
+- 切换时清空 `CheckState`、journal cursor 以及 SHM、CPU、network 采样基线，但保留 delivery spool、日报日期和进程生命周期状态。
+- 重新开启后从当前时间建立 journal cursor 和采样基线，不回放关闭期间日志，也不为关闭前异常发送恢复消息。
 
-窗口结束时立即恢复检查，不等待钉钉投递；但只有结束通知成功进入持久队列后，才删除 `maintenance.json`。通知 ID 写入状态，用于重启和模糊失败后的去重。窗口文件损坏时 fail-open，并产生去重的内部 WARN，避免错误状态造成长期静默。
+开关变化产生持久队列内部通知。当前开关与待通知状态写入 `state.json`：队列拒绝时下轮重试，成功入队后清除待通知标记。开关没有自动恢复时间，必须由运维人员再次修改 TOML 并热加载。
 
 ## 热加载与状态
 
-SIGHUP 会完整解析和严格校验新 TOML，然后一次性切换。校验失败或禁止热更新的字段发生变化时，旧配置继续运行并产生内部 WARN。具体允许范围见 [`operations.md`](operations.md#热加载)。
+SIGHUP 会完整解析和严格校验新 TOML，然后一次性切换。`runtime.enabled` 属于允许热更新字段；校验失败或禁止热更新的字段发生变化时，旧配置继续运行并产生内部 WARN。具体允许范围见 [`operations.md`](operations.md#热加载)。
 
-`state.json` 保存 check 状态、journal cursor、日报日期、正常关闭标记和维护通知 ID。保存采用临时文件、`fsync`、原子 rename 和目录 `fsync`。旧状态新增字段使用 serde 默认值兼容；状态保存失败会留下本地 ERROR 并进入自监控路径。
+`state.json` 保存 check 状态、journal cursor、日报日期、正常关闭标记以及监控开关通知状态。保存采用临时文件、`fsync`、原子 rename 和目录 `fsync`。旧状态新增字段使用 serde 默认值兼容；状态保存失败会留下本地 ERROR 并进入自监控路径。
 
 正常退出前写入 `clean_shutdown=true`；启动后立即写回 `false`。下一次启动发现明确的 `false` 才报告异常重启，旧状态缺少该字段时保持未知，不制造首次升级噪声。
 

@@ -18,6 +18,26 @@ critical_used_pct = 90
 fn accepts_minimal_config() {
     let config: Config = toml::from_str(valid()).unwrap();
     config::validate_config(&config).unwrap();
+    assert!(config.runtime.enabled);
+}
+
+#[test]
+fn accepts_explicitly_disabled_runtime_switch() {
+    let config: Config = toml::from_str(&valid().replace(
+        "state_dir = \"/tmp/alertd\"",
+        "enabled = false\nstate_dir = \"/tmp/alertd\"",
+    ))
+    .unwrap();
+
+    config::validate_config(&config).unwrap();
+    assert!(!config.runtime.enabled);
+    assert!(
+        toml::from_str::<Config>(&valid().replace(
+            "state_dir = \"/tmp/alertd\"",
+            "enabled = \"false\"\nstate_dir = \"/tmp/alertd\"",
+        ))
+        .is_err()
+    );
 }
 
 #[test]

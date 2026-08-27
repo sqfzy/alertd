@@ -1,11 +1,14 @@
 [runtime]
+# 全局监控开关，默认 true；支持 SIGHUP 热加载。false 时停止 check 与日报，
+# 但 daemon、watchdog、自监控和已有队列投递继续运行，且不会自动恢复。
+enabled = true
 # 稳定角色名，1..=128 字节；省略时读取 hostname。
 # host = "market-sg"
 # 可选 IPv4/IPv6；仅用于消息识别，不自动探测。
 # ip = "203.0.113.10"
 # 采样周期：5s..=1h。
 interval = "30s"
-# 绝对路径；状态、队列和维护窗口均保存在这里。
+# 绝对路径；状态和持久投递队列均保存在这里。
 state_dir = "/var/lib/alertd"
 # trace/debug/info/warn/error；CLI --log-level 可覆盖启动值。
 log_level = "info"

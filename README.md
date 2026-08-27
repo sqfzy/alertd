@@ -38,14 +38,11 @@ critical_used_pct = 90
 
 ```sh
 # 热加载；校验失败时继续使用旧配置
-systemctl kill -s HUP alertd
+systemctl reload alertd
 
-# 设置、查看、取消维护窗口
-alertd --config /etc/alertd/alertd.toml maintenance start \
-  --until '2026-08-21T16:00:00+08:00' \
-  --reason '业务重新部署'
-alertd --config /etc/alertd/alertd.toml maintenance status
-alertd --config /etc/alertd/alertd.toml maintenance cancel
+# 关闭全部 check 与日报：先将 runtime.enabled 改为 false 并校验
+alertd --config /etc/alertd/alertd.toml --check-config
+systemctl reload alertd
 
 # 本地日志与服务状态
 systemctl status alertd
@@ -54,8 +51,8 @@ journalctl -u alertd -n 200 --no-pager
 
 进一步阅读：
 
-- [架构与一致性](docs/architecture.md)：状态机、journald 事件、cursor、持久队列和维护窗口的不变量。
-- [部署与运维](docs/operations.md)：systemd 安装、热加载边界、维护流程、排障、升级和回滚。
+- [架构与一致性](docs/architecture.md)：状态机、journald 事件、cursor、持久队列和全局开关的不变量。
+- [部署与运维](docs/operations.md)：systemd 安装、热加载边界、监控开关、排障、升级和回滚。
 - [完整配置示例](config/alertd.toml.example)：严格 schema 的主要事实入口。
 
 ## Check 类型
@@ -89,8 +86,7 @@ alertd/
 ├── src/
 │   ├── main.rs             CLI 与进程入口
 │   ├── config.rs           严格 TOML 数据模型与校验
-│   ├── runtime.rs          采集、热加载、日报与自监控编排
-│   ├── maintenance.rs      持久化维护窗口控制
+│   ├── runtime.rs          全局开关、采集、热加载、日报与自监控编排
 │   ├── alarm.rs            告警和日志事件状态机
 │   ├── model.rs            Observation、事件与状态 POD
 │   ├── report.rs           告警、内部事件和日报排版
@@ -98,7 +94,7 @@ alertd/
 │   └── delivery/           持久队列与钉钉投递
 ├── docs/
 │   ├── architecture.md     数据流与一致性不变量
-│   └── operations.md       部署、维护、排障与回滚
+│   └── operations.md       部署、开关、排障与回滚
 ├── config/                 完整配置示例与部署角色样例
 ├── deploy/                 systemd unit 与环境文件示例
 └── tests/                  配置、collector 与报告集成测试
