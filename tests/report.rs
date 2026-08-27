@@ -80,22 +80,63 @@ fn alert_omits_unconfigured_ip() {
 }
 
 #[test]
-fn journal_event_uses_occurrence_time_without_recovery_fields() {
+fn journal_event_prioritizes_source_and_log_before_identity() {
     let now = Utc.with_ymd_and_hms(2026, 8, 13, 1, 2, 3).unwrap();
     let event = AlertEvent {
-        check_name: "journal".into(),
+        check_name: "market-journal".into(),
         severity: Severity::Critical,
         transition: Transition::Event,
         started_at: now,
         observed_at: now,
         summary: "journal 命中".into(),
-        details: BTreeMap::from([("本次命中".into(), "2".into())]),
-        runbook: None,
+        details: BTreeMap::from([
+            ("服务".into(), "market.service".into()),
+            ("命中规则".into(), "fatal".into()),
+            ("日志时间".into(), "2026-08-25T07:50:18.149168Z".into()),
+            ("日志".into(), "first line\nsecond_line".into()),
+            ("本批读取".into(), "146".into()),
+            ("本次命中".into(), "1".into()),
+            ("窗口累计".into(), "3".into()),
+            ("units".into(), "market.service, archive.service".into()),
+        ]),
+        runbook: Some("https://runbook.example/journal".into()),
     };
-    let text = report::format_alert(context(None), &event);
-    assert!(text.contains("**发生时间：**"));
+    let text = report::format_alert(context(Some("13.230.124.110")), &event);
+
+    assert!(text.starts_with("🔴 **CRITICAL · 日志告警**"));
+    assert!(text.contains("**服务：** market.service"));
+    assert!(text.contains("**命中规则：** fatal"));
+    assert!(text.contains("**日志时间：**"));
+    assert!(text.contains(":18.149"));
+    assert!(text.contains("**日志：**\n> first line\n> second_line"));
+    assert!(text.contains("**统计：** 本批读取 146 行，规则命中 1 次；窗口累计 3 次"));
+    assert!(!text.contains("**状态：**"));
+    assert!(!text.contains("**units：**"));
     assert!(!text.contains("异常开始"));
     assert!(!text.contains("恢复时间"));
+    assert!(text.find("**检查：**").unwrap() < text.find("**系统主机：**").unwrap());
+    assert!(text.find("**处理：**").unwrap() < text.find("**系统主机：**").unwrap());
+}
+
+#[test]
+fn journal_event_falls_back_to_discovery_time_and_unknown_source() {
+    let now = Utc.with_ymd_and_hms(2026, 8, 13, 1, 2, 3).unwrap();
+    let event = AlertEvent {
+        check_name: "journal".into(),
+        severity: Severity::Warn,
+        transition: Transition::Event,
+        started_at: now,
+        observed_at: now,
+        summary: "journal 命中".into(),
+        details: BTreeMap::from([("日志时间".into(), "invalid".into())]),
+        runbook: None,
+    };
+
+    let text = report::format_alert(context(None), &event);
+    assert!(text.contains("**服务：** 未知"));
+    assert!(text.contains("**命中规则：** 未知"));
+    assert!(text.contains("**发现时间：**"));
+    assert!(!text.contains("**日志时间：**"));
 }
 
 #[test]
@@ -151,13 +192,48 @@ metrics = [{ key = "value", offset = 0, value_type = "u64" }]
         "**业务指标：** latency: latency_p99_us=72 · samples=180000\nunavailable-metrics: 不可用"
     ));
     assert!(text.contains("**日志 24h：** WARN 3，ERROR 1"));
-    assert!(text.contains("**投递队列：** 2"));
+    assert!(text.contains("**投递队列：** 待发送 2 条"));
+    assert!(!text.contains("**进程/systemd：**"));
+    assert!(!text.contains("**SHM/文件链路：**"));
+    assert!(!text.contains("**时钟/调优/网络：**"));
 }
 
 #[test]
-fn daily_report_omits_empty_metrics_group() {
+fn daily_report_omits_all_unconfigured_groups() {
     let text = report::format_daily(context(None), &[], &[], &HashMap::new(), 0);
+    assert!(!text.contains("**主机资源：**"));
+    assert!(!text.contains("**进程/systemd：**"));
+    assert!(!text.contains("**SHM/文件链路：**"));
     assert!(!text.contains("**业务指标：**"));
+    assert!(!text.contains("**日志 24h：**"));
+    assert!(!text.contains("**时钟/调优/网络：**"));
+    assert!(text.contains("**投递队列：** 待发送 0 条"));
+}
+
+#[test]
+fn daily_report_explains_configured_platform_collection_failure() {
+    let config: Config = toml::from_str(
+        r#"
+[[checks]]
+name = "clock"
+type = "time_sync"
+warn_offset = "1ms"
+critical_offset = "5ms"
+"#,
+    )
+    .unwrap();
+    let failure =
+        alertd::model::Observation::unhealthy("clock/collector", Severity::Warn, "监控采集盲区")
+            .detail("错误", "chronyc timeout");
+
+    let text = report::format_daily(
+        context(None),
+        &config.checks,
+        &[failure],
+        &HashMap::new(),
+        0,
+    );
+    assert!(text.contains("**时钟/调优/网络：** clock: 采集不可用（chronyc timeout）"));
 }
 
 #[test]
