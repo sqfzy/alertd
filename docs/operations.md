@@ -14,12 +14,14 @@ install -o root -g root -m 0600 deploy/alertd.env.example /etc/alertd/alertd.env
 install -o root -g root -m 0644 deploy/alertd.service /etc/systemd/system/alertd.service
 ```
 
-编辑环境文件，只保存配置所引用的密钥变量，不把 token 或 secret 写入 TOML：
+编辑环境文件，只保存配置所引用的凭据，不把 token 或 secret 写入 TOML。token 始终必填；加签机器人还需提供 secret，IP 白名单机器人应省略 secret：
 
 ```sh
 ALERTD_DINGTALK_TOKEN=replace-me
-ALERTD_DINGTALK_SECRET=replace-me
+# ALERTD_DINGTALK_SECRET=replace-me
 ```
+
+`delivery.secret_env` 继续指定可选 secret 的环境变量名：该变量存在且非空时请求携带 `timestamp` 和 `sign`；缺失或为空时只携带 access token。启动 INFO 日志中的 `signing_enabled` 可用于确认实际模式。
 
 启动前执行：
 

@@ -952,17 +952,70 @@ fn valid_posix_shm_name(path: &str) -> bool {
 
 pub fn resolve_dingtalk_credentials(
     config: &DeliveryConfig,
-) -> Result<(String, String), ConfigError> {
-    let token = std::env::var(&config.token_env).map_err(|_| {
-        ConfigError::Invalid(format!("environment {} is missing", config.token_env))
-    })?;
-    let secret = std::env::var(&config.secret_env).map_err(|_| {
-        ConfigError::Invalid(format!("environment {} is missing", config.secret_env))
-    })?;
-    if token.is_empty() || secret.is_empty() {
-        return Err(ConfigError::Invalid(
-            "DingTalk credentials cannot be empty".into(),
-        ));
-    }
+) -> Result<(String, Option<String>), ConfigError> {
+    let token = required_environment_value(&config.token_env, std::env::var(&config.token_env))?;
+    let secret = optional_environment_value(&config.secret_env, std::env::var(&config.secret_env))?;
     Ok((token, secret))
+}
+
+fn required_environment_value(
+    name: &str,
+    value: Result<String, std::env::VarError>,
+) -> Result<String, ConfigError> {
+    match value {
+        Ok(value) if !value.is_empty() => Ok(value),
+        Ok(_) => Err(ConfigError::Invalid(format!(
+            "environment {name} cannot be empty"
+        ))),
+        Err(std::env::VarError::NotPresent) => Err(ConfigError::Invalid(format!(
+            "environment {name} is missing"
+        ))),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::Invalid(format!(
+            "environment {name} is not valid Unicode"
+        ))),
+    }
+}
+
+fn optional_environment_value(
+    name: &str,
+    value: Result<String, std::env::VarError>,
+) -> Result<Option<String>, ConfigError> {
+    match value {
+        Ok(value) if !value.is_empty() => Ok(Some(value)),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::Invalid(format!(
+            "environment {name} is not valid Unicode"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn dingtalk_token_is_required_and_non_empty() {
+        assert_eq!(
+            required_environment_value("TOKEN", Ok("token".into())).unwrap(),
+            "token"
+        );
+        assert!(required_environment_value("TOKEN", Ok(String::new())).is_err());
+        assert!(required_environment_value("TOKEN", Err(std::env::VarError::NotPresent)).is_err());
+    }
+
+    #[test]
+    fn dingtalk_secret_is_optional_for_ip_whitelist_mode() {
+        assert_eq!(
+            optional_environment_value("SECRET", Ok("secret".into())).unwrap(),
+            Some("secret".into())
+        );
+        assert_eq!(
+            optional_environment_value("SECRET", Ok(String::new())).unwrap(),
+            None
+        );
+        assert_eq!(
+            optional_environment_value("SECRET", Err(std::env::VarError::NotPresent)).unwrap(),
+            None
+        );
+    }
 }
