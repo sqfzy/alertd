@@ -790,6 +790,10 @@ fn report_context(identity: &RuntimeIdentity) -> report::ReportContext<'_> {
 
 fn build_client(config: &Config) -> Result<DingTalkClient, RuntimeError> {
     let (token, secret) = config::resolve_dingtalk_credentials(&config.delivery)?;
+    info!(
+        signing_enabled = secret.is_some(),
+        "DingTalk delivery credentials resolved"
+    );
     Ok(DingTalkClient::new(
         token,
         secret,

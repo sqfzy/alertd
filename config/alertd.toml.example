@@ -28,8 +28,9 @@ daily_report_at = "02:00"
 collect_fail_after_n = 3
 
 [delivery]
-# 值是环境变量名，密钥不写入 TOML。
+# 值是环境变量名，token 必填且不写入 TOML。
 token_env = "ALERTD_DINGTALK_TOKEN"
+# secret 环境变量存在且非空时启用加签；缺失或为空时使用 IP 白名单模式。
 secret_env = "ALERTD_DINGTALK_SECRET"
 # HTTP 超时：200ms..=30s。
 timeout = "3s"
