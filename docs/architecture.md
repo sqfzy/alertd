@@ -20,6 +20,8 @@ Collector → Observation → Alarm Engine → AlertEvent → Durable Queue → 
 
 `metrics_file` 与 `metrics_shm` 共用固定的上下限判断和展示逻辑，但保留各自明确的数据边界：前者读取生产者原子替换的 JSON 快照，适合跨字段一致的聚合结果；后者只从一次打开的 SHM 文件描述符定点读取 ABI 与配置字段，适合低成本单值采样。两者都不保存历史或自行计算聚合窗口，也不解析表达式、多段区间或跨指标规则。
 
+`journal` check 使用每个 check 一个常驻 `journalctl --follow --output=json` worker。worker 只负责增量读取和有界批次背压，runtime 继续负责过滤、告警和 cursor 提交；因此采样周期不会重新启动 `journalctl`，也不会把“暂时没有新日志”当成命令超时。`runtime.command_timeout` 仅作用于一次性命令。
+
 SHM 数值读取不引入业务 ABI parser 或 seqlock。生产者负责用自然对齐的原子写更新每个字段；单轮多个字段可能来自不同写入时刻。路径在读取期间被替换时，已打开文件描述符保证本轮不会混合两个 inode。ABI mismatch 会跳过后续数值读取并作为对象异常进入统一状态机；权限、短读、越界或非法浮点则属于 collector failure。
 
 主要实现位于 `src/collectors/`、`src/model.rs`、`src/alarm.rs`、`src/report.rs`、`src/delivery/queue.rs` 和 `src/delivery/dingtalk.rs`。
@@ -52,6 +54,7 @@ journal check 是事件型，不把“本轮没有新日志”解释为恢复：
 - 被限频的事件仍计入窗口和日报，但不会在后续伪造恢复消息。
 - 只有需要发送的事件成功进入持久队列后，才提交该批次的 journal cursor。
 - 纯过滤或已被限频的批次已经被逻辑处理，可以提交 cursor。
+- worker 发送批次后等待 runtime 确认；队列拒绝时保留批次并重试，通道容量和单批条数均有固定上限。
 
 最后两条共同保证：持久队列拒绝真实告警时不会越过日志；已经明确抑制的事件也不会在下一轮反复读取。
 

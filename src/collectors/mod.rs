@@ -43,6 +43,7 @@ pub struct CollectContext {
     pub shm_progress: HashMap<String, shm::ProgressState>,
     pub journal_cursors: HashMap<String, String>,
     pub pending_journal_cursors: HashMap<String, String>,
+    pub(crate) journal_workers: HashMap<String, journal::JournalWorker>,
     pub cpu_times: HashMap<String, BTreeMap<String, cpu::CpuTimes>>,
     pub network_samples: HashMap<String, network::NetworkSample>,
     pub command_timeout: Duration,

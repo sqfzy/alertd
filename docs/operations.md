@@ -71,7 +71,7 @@ journalctl -u alertd -n 50 --no-pager
 - `runtime.command_timeout`
 - 全部 `delivery` 字段
 
-禁止项涉及启动期资源或 worker 生命周期，需要通过安全重启生效。任何解析、校验或边界检查失败都会保留旧配置并记录 ERROR，同时尝试发送内部 WARN。
+禁止项涉及启动期资源或 worker 生命周期，需要通过安全重启生效。`runtime.command_timeout` 只限制一次性外部命令，不限制常驻 journal worker 等待新日志。任何解析、校验或边界检查失败都会保留旧配置并记录 ERROR，同时尝试发送内部 WARN。
 
 ## 全局监控开关
 
@@ -114,11 +114,11 @@ systemctl show alertd -p ActiveState -p SubState -p NRestarts -p WatchdogTimesta
 常见检查顺序：
 
 1. 运行 `--check-config`，确认严格 schema 和范围校验通过。
-2. 查看 alertd unit 的 ERROR/WARN，确认不是 collector 命令超时或权限问题。
+2. 查看 alertd unit 的 ERROR/WARN，确认不是一次性 collector 命令超时、journal worker 退出或权限问题。
 3. 查看 `runtime.enabled`、`systemctl status` 和最近一次热加载日志，确认监控没有被关闭。
 4. 统计 `spool/*.json`，确认是否为钉钉超时、429/5xx 或队列已满。
 5. 检查 `spool/quarantine/`；隔离文件不会自动重新投递。
-6. 对 journal check，用源服务的 `journalctl -u <unit>` 核对原文、过滤子串和 cursor 行为。
+6. 对 journal check，先查看 alertd 的 worker 启动/退出、批次接收和确认日志，再用源服务的 `journalctl -u <unit>` 核对原文、过滤子串和 cursor 行为。worker 退出会按退避自动重启；没有新日志不属于超时。
 7. 对主机 check，直接检查对应 `/proc`、`/sys`、挂载点、`systemctl show` 或 `chronyc -c tracking`。
 8. 对 `metrics_file`，检查文件大小、mtime、JSON 顶层对象和配置 key；生产者应以原子 rename 更新。
 9. 对 `metrics_shm`，先核对 `/dev/shm/<name>` 的权限与大小，再按配置 offset、类型、字节序和可选 ABI 原始字节检查生产者布局。ABI 不匹配是对象异常；短读、越界和非法浮点会进入采集盲区路径。

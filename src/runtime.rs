@@ -171,6 +171,7 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
     }
     info!("alertd stopping");
     notify_systemd("STOPPING=1");
+    collectors::journal::stop_workers(&mut context);
     persistent.clean_shutdown = Some(true);
     if let Err(error) = state::save(&config.runtime.state_dir, &persistent) {
         error!(%error, "cannot persist clean shutdown state");
@@ -233,6 +234,7 @@ fn reset_persistent_monitoring_state(persistent: &mut PersistentState) {
 }
 
 fn reset_collect_context(context: &mut CollectContext) {
+    collectors::journal::stop_workers(context);
     context.shm_progress.clear();
     context.journal_cursors.clear();
     context.pending_journal_cursors.clear();
@@ -351,8 +353,10 @@ fn run_checks(
                 );
                 if accepted {
                     // 需要通知时，journal cursor 必须晚于消息入队，避免队列拒绝时越过日志。
-                    if let Some(cursor) = context.pending_journal_cursors.remove(&check.name) {
-                        context.journal_cursors.insert(check.name.clone(), cursor);
+                    if collectors::journal::acknowledge(&check.name, context) {
+                        if let Some(cursor) = context.pending_journal_cursors.remove(&check.name) {
+                            context.journal_cursors.insert(check.name.clone(), cursor);
+                        }
                     }
                 }
                 observations.push(observation);
@@ -689,6 +693,7 @@ fn reload_config(
                 .pending_journal_cursors
                 .retain(|name, _| active_checks.contains(name));
             *config = next.config;
+            collectors::journal::reconcile_workers(&config.checks, context);
             if monitoring_changed {
                 apply_monitoring_transition(config.runtime.enabled, persistent, context);
                 persist_monitoring_notice_state(&config.runtime.state_dir, persistent);

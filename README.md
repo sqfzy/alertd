@@ -59,7 +59,7 @@ journalctl -u alertd -n 200 --no-pager
 
 - `process`：匹配进程命令行和最少实例数。
 - `shm`：检查 POSIX SHM 存在性或计数器推进。
-- `journal`：按 unit 和普通子串匹配事件，可优先过滤已知噪声。
+- `journal`：由常驻 `journalctl --follow` worker 按 unit 增量读取，再按普通子串匹配事件，可优先过滤已知噪声。
 - `systemd`：检查一组 service/timer 的 loaded、active 状态。
 - `latest_file`：检查匹配文件的大小和 mtime 新鲜度。
 - `metrics_file`：读取原子覆盖的 JSON 数值快照，检查新鲜度和可选上下限，并纳入日报。

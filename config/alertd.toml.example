@@ -12,7 +12,7 @@ interval = "30s"
 state_dir = "/var/lib/alertd"
 # trace/debug/info/warn/error；CLI --log-level 可覆盖启动值。
 log_level = "info"
-# 外部命令超时：200ms..=30s。
+# 一次性外部命令超时：200ms..=30s；不限制常驻 journal worker。
 command_timeout = "3s"
 
 [alarm]
