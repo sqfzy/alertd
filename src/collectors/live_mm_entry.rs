@@ -65,18 +65,28 @@ fn evaluate(
 
         match result {
             Ok((state, age)) => {
-                let healthy = state.operator_enabled == 1
-                    && state.entries_enabled == 1
-                    && state.runtime_risk_mask == 0;
-                details.push(format_state(instance, &state, age, healthy));
-                if !healthy {
+                details.push(format!(
+                    "{} unit={} operator={} entries={} risk=0x{:08x} reason={} generation={} age={}s",
+                    instance.name,
+                    instance.unit,
+                    state.operator_enabled,
+                    state.entries_enabled,
+                    state.runtime_risk_mask,
+                    state.reason,
+                    state.generation,
+                    age.as_secs()
+                ));
+                if state.operator_enabled != 1
+                    || state.entries_enabled != 1
+                    || state.runtime_risk_mask != 0
+                {
                     failures.push(instance.name.clone());
                 }
             }
             Err(error) => {
                 details.push(format!(
-                    "- 🔴 **{}**｜状态 `{}`｜Unit `{}`",
-                    instance.name, error, instance.unit
+                    "{} unit={} {}",
+                    instance.name, instance.unit, error
                 ));
                 failures.push(instance.name.clone());
             }
@@ -93,35 +103,7 @@ fn evaluate(
     } else {
         Observation::unhealthy(&check.name, Severity::Critical, summary)
     };
-    observation.detail("实例状态", details.join("\n\n"))
-}
-
-fn format_state(
-    instance: &LiveMmInstance,
-    state: &EntryState,
-    age: Duration,
-    healthy: bool,
-) -> String {
-    let marker = if healthy { "🟢" } else { "🔴" };
-    format!(
-        "- {marker} **{}**｜操作开关 `{}`｜实际开仓 `{}`｜风险位 `0x{:08x}`  \n  原因 `{}`｜代次 `{}`｜年龄 `{}s`｜Unit `{}`",
-        instance.name,
-        enabled_label(state.operator_enabled),
-        enabled_label(state.entries_enabled),
-        state.runtime_risk_mask,
-        state.reason,
-        state.generation,
-        age.as_secs(),
-        instance.unit
-    )
-}
-
-fn enabled_label(value: u8) -> &'static str {
-    match value {
-        0 => "关",
-        1 => "开",
-        _ => "异常",
-    }
+    observation.detail("实例状态", details.join("\n"))
 }
 
 fn latest_by_unit(rows: &[JournalState]) -> HashMap<&str, &JournalState> {
@@ -314,13 +296,6 @@ mod tests {
         ));
         assert!(observation.summary.contains("live_mm2"));
         assert!(observation.summary.contains("live_mm3"));
-        let details = &observation.details["实例状态"];
-        assert!(details.contains("- 🟢 **live_mm1**｜操作开关 `开`｜实际开仓 `开`"));
-        assert!(
-            details
-                .contains("- 🔴 **live_mm2**｜操作开关 `开`｜实际开仓 `关`｜风险位 `0x00000002`")
-        );
-        assert!(details.contains("\n\n- 🔴 **live_mm3**"));
     }
 
     #[test]
@@ -347,7 +322,7 @@ mod tests {
         let details = &observation.details["实例状态"];
         assert!(details.contains("状态过期"));
         assert!(details.contains("字段缺失 operator_enabled"));
-        assert!(details.contains("- 🔴 **live_mm3**｜状态 `状态缺失`｜Unit `live_mm3.service`"));
+        assert!(details.contains("live_mm3 unit=live_mm3.service 状态缺失"));
     }
 
     #[test]
