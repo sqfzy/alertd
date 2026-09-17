@@ -25,16 +25,39 @@ struct JournalState {
     observed_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug)]
+struct StrategyStats {
+    snapshot_id: u64,
+    observed_at: DateTime<Utc>,
+    fields: HashMap<String, String>,
+    symbols: Vec<HashMap<String, String>>,
+}
+
 pub fn collect(
     check: &CheckConfig,
     instances: &[LiveMmInstance],
     stale_after: &str,
+    statistics_stale_after: Option<&str>,
     timeout: Duration,
 ) -> Result<Observation, CollectError> {
     let stale_after = config::parse_duration(stale_after)
         .map_err(|error| CollectError::Invalid(error.to_string()))?;
-    let rows = read_latest(instances, stale_after, timeout)?;
-    Ok(evaluate(check, instances, &rows, Utc::now(), stale_after))
+    let statistics_stale_after = statistics_stale_after
+        .map(config::parse_duration)
+        .transpose()
+        .map_err(|error| CollectError::Invalid(error.to_string()))?;
+    let horizon = statistics_stale_after
+        .unwrap_or(stale_after)
+        .max(stale_after);
+    let rows = read_latest(instances, horizon, timeout)?;
+    Ok(evaluate(
+        check,
+        instances,
+        &rows,
+        Utc::now(),
+        stale_after,
+        statistics_stale_after,
+    ))
 }
 
 fn evaluate(
@@ -43,8 +66,10 @@ fn evaluate(
     rows: &[JournalState],
     now: DateTime<Utc>,
     stale_after: Duration,
+    statistics_stale_after: Option<Duration>,
 ) -> Observation {
     let latest = latest_by_unit(rows);
+    let statistics = latest_statistics_by_unit(rows);
     let mut failures = Vec::new();
     let mut details = Vec::new();
 
@@ -91,6 +116,30 @@ fn evaluate(
                 failures.push(instance.name.clone());
             }
         }
+
+        if let Some(maximum_age) = statistics_stale_after {
+            match statistics.get(instance.unit.as_str()) {
+                Some(snapshot) => {
+                    let age = now
+                        .signed_duration_since(snapshot.observed_at)
+                        .to_std()
+                        .unwrap_or(Duration::ZERO);
+                    if age > maximum_age {
+                        failures.push(instance.name.clone());
+                        details.push(format!(
+                            "{} statistics stale snapshot_id={} age={}s",
+                            instance.name,
+                            snapshot.snapshot_id,
+                            age.as_secs()
+                        ));
+                    }
+                }
+                None => {
+                    failures.push(instance.name.clone());
+                    details.push(format!("{} statistics missing", instance.name));
+                }
+            }
+        }
     }
 
     let summary = if failures.is_empty() {
@@ -103,7 +152,260 @@ fn evaluate(
     } else {
         Observation::unhealthy(&check.name, Severity::Critical, summary)
     };
-    observation.detail("实例状态", details.join("\n"))
+    let mut observation = observation.detail("实例状态", details.join("\n"));
+    if statistics_stale_after.is_some() {
+        observation = observation.detail(
+            "策略统计",
+            format_statistics_report(instances, &statistics, now),
+        );
+    }
+    observation
+}
+
+fn latest_statistics_by_unit(rows: &[JournalState]) -> HashMap<&str, StrategyStats> {
+    let mut summaries: HashMap<&str, StrategyStats> = HashMap::new();
+    for row in rows {
+        if !row.message.contains("event=strategy_stats ") {
+            continue;
+        }
+        let Ok(fields) = fields(&row.message) else {
+            continue;
+        };
+        let Some(snapshot_id) = fields
+            .get("snapshot_id")
+            .and_then(|value| value.parse().ok())
+        else {
+            continue;
+        };
+        if !valid_statistics_fields(&fields) {
+            continue;
+        }
+        match summaries.get(row.unit.as_str()) {
+            Some(previous) if previous.observed_at >= row.observed_at => {}
+            _ => {
+                summaries.insert(
+                    row.unit.as_str(),
+                    StrategyStats {
+                        snapshot_id,
+                        observed_at: row.observed_at,
+                        fields,
+                        symbols: Vec::new(),
+                    },
+                );
+            }
+        }
+    }
+    for row in rows {
+        if !row.message.contains("event=strategy_symbol_stats ") {
+            continue;
+        }
+        let Ok(fields) = fields(&row.message) else {
+            continue;
+        };
+        let Some(snapshot) = summaries.get_mut(row.unit.as_str()) else {
+            continue;
+        };
+        if !valid_symbol_fields(&fields) {
+            continue;
+        }
+        if fields
+            .get("snapshot_id")
+            .is_some_and(|value| value == &snapshot.snapshot_id.to_string())
+            && row.observed_at <= snapshot.observed_at
+        {
+            snapshot.symbols.push(fields);
+        }
+    }
+    summaries
+}
+
+fn valid_statistics_fields(fields: &HashMap<String, String>) -> bool {
+    const UNSIGNED: &[&str] = &[
+        "snapshot_id",
+        "account_readable",
+        "equity_valid",
+        "equity_1e8",
+        "equity_age_ms",
+        "exposure_valid",
+        "nonzero_positions",
+        "unpriced_positions",
+        "entries_enabled",
+        "operator_enabled",
+        "active_open",
+        "active_maker",
+        "active_taker",
+        "active_episodes",
+        "open_delta",
+        "close_delta",
+        "fills_delta",
+        "place_fail_delta",
+    ];
+    UNSIGNED.iter().all(|name| {
+        fields
+            .get(*name)
+            .is_some_and(|value| value.parse::<u64>().is_ok())
+    }) && ["gross_exposure_1e8", "net_exposure_1e8"]
+        .iter()
+        .all(|name| {
+            fields
+                .get(*name)
+                .is_some_and(|value| value.parse::<i64>().is_ok())
+        })
+        && fields
+            .get("runtime_risk_mask")
+            .is_some_and(|value| u32::from_str_radix(value.trim_start_matches("0x"), 16).is_ok())
+}
+
+fn valid_symbol_fields(fields: &HashMap<String, String>) -> bool {
+    fields.get("coin").is_some_and(|coin| !coin.is_empty())
+        && [
+            "snapshot_id",
+            "priced",
+            "account_age_ms",
+            "active_open",
+            "active_maker",
+            "active_taker",
+            "active_episodes",
+        ]
+        .iter()
+        .all(|name| {
+            fields
+                .get(*name)
+                .is_some_and(|value| value.parse::<u64>().is_ok())
+        })
+        && ["position_1e8", "signed_exposure_1e8"].iter().all(|name| {
+            fields
+                .get(*name)
+                .is_some_and(|value| value.parse::<i64>().is_ok())
+        })
+}
+
+fn fields(message: &str) -> Result<HashMap<String, String>, String> {
+    let mut result = HashMap::new();
+    for part in message.split_ascii_whitespace() {
+        let Some((name, value)) = part.split_once('=') else {
+            continue;
+        };
+        if !name.is_empty() && !value.is_empty() {
+            result.insert(name.to_owned(), value.to_owned());
+        }
+    }
+    if result.is_empty() {
+        Err("no structured fields".into())
+    } else {
+        Ok(result)
+    }
+}
+
+fn number(fields: &HashMap<String, String>, name: &str) -> String {
+    fields.get(name).cloned().unwrap_or_else(|| "?".into())
+}
+
+fn usdt(fields: &HashMap<String, String>, valid: &str, value: &str) -> String {
+    if fields.get(valid).is_none_or(|flag| flag != "1") {
+        return "unknown".into();
+    }
+    fields
+        .get(value)
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .map(|raw| format!("{:.2} U", raw as f64 / 100_000_000.0))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn format_statistics_report(
+    instances: &[LiveMmInstance],
+    statistics: &HashMap<&str, StrategyStats>,
+    now: DateTime<Utc>,
+) -> String {
+    let mut output = Vec::new();
+    let mut available = 0_u64;
+    let mut entries = 0_u64;
+    let mut risks = 0_u64;
+    let mut total_equity = 0_i128;
+    let mut total_gross = 0_i128;
+    let mut total_net = 0_i128;
+    let mut totals_valid = true;
+    for instance in instances {
+        let Some(snapshot) = statistics.get(instance.unit.as_str()) else {
+            totals_valid = false;
+            continue;
+        };
+        available += 1;
+        let fields = &snapshot.fields;
+        entries += u64::from(number(fields, "entries_enabled") == "1");
+        risks += u64::from(number(fields, "runtime_risk_mask") != "00000000");
+        if fields.get("equity_valid").is_none_or(|value| value != "1")
+            || fields
+                .get("exposure_valid")
+                .is_none_or(|value| value != "1")
+        {
+            totals_valid = false;
+            continue;
+        }
+        total_equity += fields["equity_1e8"].parse::<i128>().unwrap_or_default();
+        total_gross += fields["gross_exposure_1e8"]
+            .parse::<i128>()
+            .unwrap_or_default();
+        total_net += fields["net_exposure_1e8"]
+            .parse::<i128>()
+            .unwrap_or_default();
+    }
+    output.push(format!(
+        "总体：{available}/{}盘有统计｜入口开启 {entries}｜风险盘 {risks}",
+        instances.len()
+    ));
+    output.push(if totals_valid {
+        format!(
+            "总权益：{:.2} U｜gross：{:.2} U｜net：{:.2} U",
+            total_equity as f64 / 100_000_000.0,
+            total_gross as f64 / 100_000_000.0,
+            total_net as f64 / 100_000_000.0,
+        )
+    } else {
+        "总权益 / gross / net：unknown（存在缺失或无法定价样本）".into()
+    });
+    for instance in instances {
+        let Some(snapshot) = statistics.get(instance.unit.as_str()) else {
+            output.push(format!("{}: statistics unavailable", instance.name));
+            continue;
+        };
+        let fields = &snapshot.fields;
+        let age = now
+            .signed_duration_since(snapshot.observed_at)
+            .num_seconds()
+            .max(0);
+        output.push(format!(
+            "{}\n入口：{}｜风险：0x{}｜样本年龄：{}s\n权益：{}｜gross：{}｜net：{}\n活动：open {}｜maker {}｜taker {}｜episodes {}\n近30s：open {}｜close {}｜fills {}｜fail {}",
+            instance.name,
+            if number(fields, "entries_enabled") == "1" { "开" } else { "关" },
+            number(fields, "runtime_risk_mask"),
+            age,
+            usdt(fields, "equity_valid", "equity_1e8"),
+            usdt(fields, "exposure_valid", "gross_exposure_1e8"),
+            usdt(fields, "exposure_valid", "net_exposure_1e8"),
+            number(fields, "active_open"), number(fields, "active_maker"),
+            number(fields, "active_taker"), number(fields, "active_episodes"),
+            number(fields, "open_delta"), number(fields, "close_delta"),
+            number(fields, "fills_delta"), number(fields, "place_fail_delta"),
+        ));
+        if !snapshot.symbols.is_empty() {
+            output.push("非零/活动币种：".into());
+            for symbol in &snapshot.symbols {
+                output.push(format!(
+                    "- {} position={} exposure={} account_age={}ms active={}/{}/{} episodes={}",
+                    number(symbol, "coin"),
+                    number(symbol, "position_1e8"),
+                    usdt(symbol, "priced", "signed_exposure_1e8"),
+                    number(symbol, "account_age_ms"),
+                    number(symbol, "active_open"),
+                    number(symbol, "active_maker"),
+                    number(symbol, "active_taker"),
+                    number(symbol, "active_episodes"),
+                ));
+            }
+        }
+    }
+    output.join("\n")
 }
 
 fn latest_by_unit(rows: &[JournalState]) -> HashMap<&str, &JournalState> {
@@ -232,6 +534,8 @@ mod tests {
             kind: CheckKind::LiveMmEntry {
                 instances: instances(),
                 stale_after: "20s".into(),
+                statistics_stale_after: None,
+                statistics_report_every: "off".into(),
             },
         }
     }
@@ -268,6 +572,7 @@ mod tests {
             &rows,
             Utc.timestamp_opt(105, 0).unwrap(),
             Duration::from_secs(20),
+            None,
         );
         assert!(matches!(
             observation.status,
@@ -289,6 +594,7 @@ mod tests {
             &rows,
             Utc.timestamp_opt(105, 0).unwrap(),
             Duration::from_secs(20),
+            None,
         );
         assert!(matches!(
             observation.status,
@@ -314,6 +620,7 @@ mod tests {
             &rows,
             Utc.timestamp_opt(105, 0).unwrap(),
             Duration::from_secs(20),
+            None,
         );
         assert!(matches!(
             observation.status,
@@ -323,6 +630,67 @@ mod tests {
         assert!(details.contains("状态过期"));
         assert!(details.contains("字段缺失 operator_enabled"));
         assert!(details.contains("live_mm3 unit=live_mm3.service 状态缺失"));
+    }
+
+    #[test]
+    fn accepts_only_complete_statistics_snapshot_and_formats_active_symbol() {
+        let mut rows = instances()
+            .iter()
+            .map(|instance| row(&instance.name, 100, 1, 1, "00000000"))
+            .collect::<Vec<_>>();
+        for instance in instances() {
+            rows.push(JournalState {
+                unit: instance.unit.clone(),
+                message: "[INFO] event=strategy_symbol_stats snapshot_id=7 coin=APE position_1e8=100000000 signed_exposure_1e8=125000000 priced=1 account_age_ms=3 active_open=1 active_maker=0 active_taker=0 active_episodes=1".into(),
+                observed_at: Utc.timestamp_opt(101, 0).unwrap(),
+            });
+            rows.push(JournalState {
+                unit: instance.unit,
+                message: "[INFO] event=strategy_stats snapshot_id=7 account_readable=1 equity_valid=1 equity_1e8=10000000000 equity_age_ms=3 exposure_valid=1 gross_exposure_1e8=125000000 net_exposure_1e8=125000000 nonzero_positions=1 unpriced_positions=0 entries_enabled=1 operator_enabled=1 runtime_risk_mask=00000000 active_open=1 active_maker=0 active_taker=0 active_episodes=1 open_delta=1 close_delta=0 fills_delta=0 place_fail_delta=0".into(),
+                observed_at: Utc.timestamp_opt(102, 0).unwrap(),
+            });
+        }
+        let observation = evaluate(
+            &check(),
+            &instances(),
+            &rows,
+            Utc.timestamp_opt(105, 0).unwrap(),
+            Duration::from_secs(20),
+            Some(Duration::from_secs(90)),
+        );
+        assert!(matches!(
+            observation.status,
+            crate::model::ObservationStatus::Healthy
+        ));
+        let report = &observation.details["策略统计"];
+        assert!(report.contains("总体：4/4盘有统计｜入口开启 4｜风险盘 0"));
+        assert!(report.contains("APE position=100000000 exposure=1.25 U"));
+    }
+
+    #[test]
+    fn rejects_statistics_without_commit_marker() {
+        let mut rows = instances()
+            .iter()
+            .map(|instance| row(&instance.name, 100, 1, 1, "00000000"))
+            .collect::<Vec<_>>();
+        rows.push(JournalState {
+            unit: "live_mm1.service".into(),
+            message: "[INFO] event=strategy_symbol_stats snapshot_id=9 coin=APE".into(),
+            observed_at: Utc.timestamp_opt(102, 0).unwrap(),
+        });
+        let observation = evaluate(
+            &check(),
+            &instances(),
+            &rows,
+            Utc.timestamp_opt(105, 0).unwrap(),
+            Duration::from_secs(20),
+            Some(Duration::from_secs(90)),
+        );
+        assert!(matches!(
+            observation.status,
+            crate::model::ObservationStatus::Unhealthy(Severity::Critical)
+        ));
+        assert!(observation.details["实例状态"].contains("statistics missing"));
     }
 
     #[test]

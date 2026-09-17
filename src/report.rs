@@ -182,6 +182,17 @@ pub fn format_internal(
     text
 }
 
+pub fn format_statistics(context: ReportContext<'_>, body: &str) -> String {
+    let mut text = "📊 **LIVE_MM · 周期策略统计**".to_string();
+    push_field(&mut text, "主机", context.host);
+    if let Some(ip) = context.ip {
+        push_field(&mut text, "IP", ip);
+    }
+    text.push_str("\n\n");
+    text.push_str(body);
+    text
+}
+
 fn is_healthy(observation: &Observation) -> bool {
     matches!(observation.status, ObservationStatus::Healthy)
 }

@@ -122,6 +122,8 @@ interval = "5s"
 name = "live-mm-entry"
 type = "live_mm_entry"
 stale_after = "20s"
+statistics_stale_after = "90s"
+statistics_report_every = "10m"
 instances = [
   { name = "live_mm1", unit = "live-mm-v0.service" },
   { name = "live_mm2", unit = "live-mm-v0@account8.service" },

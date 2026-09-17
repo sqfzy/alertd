@@ -116,4 +116,6 @@ pub struct CheckState {
     pub daily_warn_count: u64,
     #[serde(default)]
     pub daily_critical_count: u64,
+    #[serde(default)]
+    pub last_statistics_report_bucket: Option<String>,
 }

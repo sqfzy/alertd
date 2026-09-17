@@ -36,6 +36,9 @@ fn default_critical_repeat() -> String {
 fn default_daily() -> Option<String> {
     Some("02:00".into())
 }
+fn default_statistics_report_every() -> String {
+    "off".into()
+}
 fn default_token_env() -> String {
     "ALERTD_DINGTALK_TOKEN".into()
 }
@@ -226,6 +229,9 @@ pub enum CheckKind {
     LiveMmEntry {
         instances: Vec<LiveMmInstance>,
         stale_after: String,
+        statistics_stale_after: Option<String>,
+        #[serde(default = "default_statistics_report_every")]
+        statistics_report_every: String,
     },
     Systemd {
         units: Vec<String>,
@@ -611,6 +617,8 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
         CheckKind::LiveMmEntry {
             instances,
             stale_after,
+            statistics_stale_after,
+            statistics_report_every,
         } => {
             let mut names = HashSet::new();
             let mut units = HashSet::new();
@@ -637,6 +645,28 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
                 interval,
                 Duration::from_secs(300),
             )?;
+            if let Some(value) = statistics_stale_after {
+                duration_range(
+                    "checks.live_mm_entry.statistics_stale_after",
+                    value,
+                    Duration::from_secs(30),
+                    Duration::from_secs(300),
+                )?;
+            }
+            if statistics_report_every != "off" {
+                duration_range(
+                    "checks.live_mm_entry.statistics_report_every",
+                    statistics_report_every,
+                    Duration::from_secs(60),
+                    Duration::from_secs(24 * 3600),
+                )?;
+                if statistics_stale_after.is_none() {
+                    return Err(ConfigError::Invalid(format!(
+                        "check {} needs statistics_stale_after when statistics reports are enabled",
+                        check.name
+                    )));
+                }
+            }
             Ok(())
         }
         CheckKind::Systemd { units }

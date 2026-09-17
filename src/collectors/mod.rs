@@ -84,7 +84,15 @@ pub fn collect(
         CheckKind::LiveMmEntry {
             instances,
             stale_after,
-        } => live_mm_entry::collect(check, instances, stale_after, context.command_timeout),
+            statistics_stale_after,
+            ..
+        } => live_mm_entry::collect(
+            check,
+            instances,
+            stale_after,
+            statistics_stale_after.as_deref(),
+            context.command_timeout,
+        ),
         CheckKind::Systemd { units } => systemd::collect(check, units, context.command_timeout),
         CheckKind::LatestFile {
             directory,

@@ -8,7 +8,7 @@ use crate::{
     state::{self, PersistentState},
     systemd_notify,
 };
-use chrono::Local;
+use chrono::{Local, Utc};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::{
@@ -146,6 +146,14 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
             .journal_cursors
             .clone_from(&context.journal_cursors);
         maybe_daily(
+            &config,
+            report_context,
+            &mut persistent,
+            &queue,
+            options.dry_run,
+            &observations,
+        );
+        maybe_statistics_reports(
             &config,
             report_context,
             &mut persistent,
@@ -548,6 +556,54 @@ fn maybe_daily(
                 state.daily_warn_count = 0;
                 state.daily_critical_count = 0;
             }
+        }
+    }
+}
+
+fn maybe_statistics_reports(
+    config: &Config,
+    report_context: report::ReportContext<'_>,
+    persistent: &mut PersistentState,
+    queue: &DeliveryQueue,
+    dry_run: bool,
+    observations: &[Observation],
+) {
+    let now = Utc::now();
+    for check in config.checks.iter().filter(|check| check.enabled) {
+        let config::CheckKind::LiveMmEntry {
+            statistics_report_every,
+            ..
+        } = &check.kind
+        else {
+            continue;
+        };
+        if statistics_report_every == "off" {
+            continue;
+        }
+        let interval = config::parse_duration(statistics_report_every).expect("validated config");
+        let beijing_seconds = now.timestamp().saturating_add(8 * 3600);
+        let bucket_number = beijing_seconds.div_euclid(interval.as_secs() as i64);
+        let bucket = format!("{}:{bucket_number}", interval.as_secs());
+        let state = persistent.checks.entry(check.name.clone()).or_default();
+        if state.last_statistics_report_bucket.as_deref() == Some(&bucket) {
+            continue;
+        }
+        let Some(observation) = observations
+            .iter()
+            .find(|item| item.check_name == check.name)
+        else {
+            continue;
+        };
+        let Some(body) = observation.details.get("策略统计") else {
+            continue;
+        };
+        if enqueue(
+            queue,
+            Severity::Ok,
+            report::format_statistics(report_context, body),
+            dry_run,
+        ) {
+            state.last_statistics_report_bucket = Some(bucket);
         }
     }
 }
