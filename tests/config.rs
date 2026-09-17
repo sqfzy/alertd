@@ -113,6 +113,58 @@ rules = [{ contains = "ERROR", severity = "critical" }]
 }
 
 #[test]
+fn validates_live_mm_entry_contract() {
+    let text = r#"
+[runtime]
+interval = "5s"
+
+[[checks]]
+name = "live-mm-entry"
+type = "live_mm_entry"
+stale_after = "20s"
+instances = [
+  { name = "live_mm1", unit = "live-mm-v0.service" },
+  { name = "live_mm2", unit = "live-mm-v0@account8.service" },
+]
+"#;
+    let config: Config = toml::from_str(text).unwrap();
+    config::validate_config(&config).unwrap();
+
+    let duplicate: Config =
+        toml::from_str(&text.replace("name = \"live_mm2\"", "name = \"live_mm1\"")).unwrap();
+    assert!(config::validate_config(&duplicate).is_err());
+
+    let too_short: Config = toml::from_str(&text.replace("20s", "4s")).unwrap();
+    assert!(config::validate_config(&too_short).is_err());
+
+    let too_long: Config = toml::from_str(&text.replace("20s", "301s")).unwrap();
+    assert!(config::validate_config(&too_long).is_err());
+}
+
+#[test]
+fn unsigned_delivery_does_not_require_a_signing_secret() {
+    let config: Config = toml::from_str(
+        r#"
+[delivery]
+signed = false
+token_env = "ALERTD_TEST_UNSIGNED_TOKEN"
+secret_env = "ALERTD_TEST_MISSING_SECRET"
+"#,
+    )
+    .unwrap();
+    unsafe { std::env::set_var("ALERTD_TEST_UNSIGNED_TOKEN", "token") };
+    let credentials = config::resolve_dingtalk_credentials(&config.delivery).unwrap();
+    unsafe { std::env::remove_var("ALERTD_TEST_UNSIGNED_TOKEN") };
+    assert_eq!(credentials, ("token".into(), None));
+}
+
+#[test]
+fn signed_delivery_remains_the_default() {
+    let config: Config = toml::from_str("").unwrap();
+    assert!(config.delivery.signed);
+}
+
+#[test]
 fn accepts_tickfeat_production_config() {
     let config = config::load_config(std::path::Path::new("config/tickfeat-bn-spot.toml")).unwrap();
     assert_eq!(config.checks.len(), 14);

@@ -15,6 +15,8 @@ daily_report_at = "02:00" # 设为 "off" 关闭日报
 collect_fail_after_n = 3
 
 [delivery]
+# 默认 true；仅在钉钉机器人明确采用 token-only 模式时设为 false。
+signed = true
 token_env = "ALERTD_DINGTALK_TOKEN"
 secret_env = "ALERTD_DINGTALK_SECRET"
 timeout = "3s"
@@ -31,6 +33,15 @@ type = "process"
 cmdline_contains = "/current/bin/bybit_perp_market"
 min_count = 1
 runbook = "https://runbook.example/process-down"
+
+[[checks]]
+name = "live-mm-entry"
+type = "live_mm_entry"
+instances = [
+  { name = "live_mm1", unit = "live-mm-v0.service" },
+  { name = "live_mm2", unit = "live-mm-v0@account8.service" },
+]
+stale_after = "20s"
 
 [[checks]]
 name = "bybit-book"

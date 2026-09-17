@@ -1,0 +1,39 @@
+[runtime]
+host = "production-host"
+ip = "203.0.113.10"
+interval = "5s"
+state_dir = "/var/lib/alertd-live-mm"
+log_level = "info"
+command_timeout = "3s"
+
+[alarm]
+pending_for = "10s"
+recover_for = "10s"
+warn_repeat = "30m"
+critical_repeat = "10m"
+daily_report_at = "off"
+collect_fail_after_n = 3
+
+[delivery]
+signed = false
+token_env = "ALERTD_LIVE_MM_DINGTALK_TOKEN"
+secret_env = "ALERTD_LIVE_MM_DINGTALK_SECRET"
+timeout = "3s"
+queue_capacity = 1024
+queue_warn_pct = 80
+failure_report_after = 3
+retry_initial = "5s"
+retry_max = "5m"
+at_all_on_critical = false
+
+[[checks]]
+name = "live-mm-entry"
+type = "live_mm_entry"
+severity = "critical"
+stale_after = "20s"
+instances = [
+  { name = "live_mm1", unit = "live-mm-v0.service" },
+  { name = "live_mm2", unit = "live-mm-v0@account8.service" },
+  { name = "live_mm3", unit = "live-mm-v0@live_mm3.service" },
+  { name = "live_mm4", unit = "live-mm-v0@live_mm4.service" },
+]

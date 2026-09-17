@@ -1,6 +1,7 @@
 pub mod disk;
 pub mod journal;
 pub mod latest_file;
+pub mod live_mm_entry;
 pub mod memory;
 pub mod network;
 pub mod process;
@@ -80,6 +81,10 @@ pub fn collect(
             ignore_contains,
             rules,
         } => journal::collect(check, units, ignore_contains, rules, context),
+        CheckKind::LiveMmEntry {
+            instances,
+            stale_after,
+        } => live_mm_entry::collect(check, instances, stale_after, context.command_timeout),
         CheckKind::Systemd { units } => systemd::collect(check, units, context.command_timeout),
         CheckKind::LatestFile {
             directory,

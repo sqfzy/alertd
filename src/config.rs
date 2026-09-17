@@ -42,6 +42,9 @@ fn default_token_env() -> String {
 fn default_secret_env() -> String {
     "ALERTD_DINGTALK_SECRET".into()
 }
+fn default_signed() -> bool {
+    true
+}
 fn default_timeout() -> String {
     "3s".into()
 }
@@ -157,6 +160,8 @@ impl Default for AlarmConfig {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeliveryConfig {
+    #[serde(default = "default_signed")]
+    pub signed: bool,
     #[serde(default = "default_token_env")]
     pub token_env: String,
     #[serde(default = "default_secret_env")]
@@ -178,6 +183,7 @@ pub struct DeliveryConfig {
 impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
+            signed: default_signed(),
             token_env: default_token_env(),
             secret_env: default_secret_env(),
             timeout: default_timeout(),
@@ -216,6 +222,10 @@ pub enum CheckKind {
         #[serde(default)]
         ignore_contains: Vec<String>,
         rules: Vec<JournalRule>,
+    },
+    LiveMmEntry {
+        instances: Vec<LiveMmInstance>,
+        stale_after: String,
     },
     Systemd {
         units: Vec<String>,
@@ -258,6 +268,13 @@ pub enum CheckKind {
         critical_drops_per_second: f64,
     },
     SystemTuning,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveMmInstance {
+    pub name: String,
+    pub unit: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -591,6 +608,37 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
                 check.name
             )))
         }
+        CheckKind::LiveMmEntry {
+            instances,
+            stale_after,
+        } => {
+            let mut names = HashSet::new();
+            let mut units = HashSet::new();
+            if instances.is_empty()
+                || instances.len() > 64
+                || instances.iter().any(|instance| {
+                    instance.name.is_empty()
+                        || instance.name.len() > 128
+                        || instance.name.chars().any(char::is_control)
+                        || instance.unit.is_empty()
+                        || instance.unit.len() > 255
+                        || !names.insert(&instance.name)
+                        || !units.insert(&instance.unit)
+                })
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "check {} needs 1..=64 unique live_mm instance names and units",
+                    check.name
+                )));
+            }
+            duration_range(
+                "checks.live_mm_entry.stale_after",
+                stale_after,
+                interval,
+                Duration::from_secs(300),
+            )?;
+            Ok(())
+        }
         CheckKind::Systemd { units }
             if units.is_empty()
                 || units.len() > 64
@@ -720,17 +768,27 @@ fn valid_rate_thresholds(warn: f64, critical: f64) -> bool {
 
 pub fn resolve_dingtalk_credentials(
     config: &DeliveryConfig,
-) -> Result<(String, String), ConfigError> {
+) -> Result<(String, Option<String>), ConfigError> {
     let token = std::env::var(&config.token_env).map_err(|_| {
         ConfigError::Invalid(format!("environment {} is missing", config.token_env))
     })?;
-    let secret = std::env::var(&config.secret_env).map_err(|_| {
-        ConfigError::Invalid(format!("environment {} is missing", config.secret_env))
-    })?;
-    if token.is_empty() || secret.is_empty() {
+    if token.is_empty() {
         return Err(ConfigError::Invalid(
-            "DingTalk credentials cannot be empty".into(),
+            "DingTalk token cannot be empty".into(),
         ));
     }
+    let secret = if config.signed {
+        let value = std::env::var(&config.secret_env).map_err(|_| {
+            ConfigError::Invalid(format!("environment {} is missing", config.secret_env))
+        })?;
+        if value.is_empty() {
+            return Err(ConfigError::Invalid(
+                "DingTalk signing secret cannot be empty".into(),
+            ));
+        }
+        Some(value)
+    } else {
+        None
+    };
     Ok((token, secret))
 }

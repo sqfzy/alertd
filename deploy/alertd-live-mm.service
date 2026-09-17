@@ -1,0 +1,26 @@
+[Unit]
+Description=alertd live_mm entry and runtime risk monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=90s
+ExecStart=/opt/alertd-live-mm/current/alertd --config /etc/alertd-live-mm/alertd.toml
+EnvironmentFile=/etc/alertd-live-mm/alertd.env
+StateDirectory=alertd-live-mm
+CPUAffinity=20
+Nice=10
+MemoryMax=256M
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/alertd-live-mm
+
+[Install]
+WantedBy=multi-user.target

@@ -128,7 +128,10 @@ pub fn format_daily(
                     journal_critical = journal_critical.saturating_add(state.daily_critical_count);
                 }
             }
-            CheckKind::TimeSync { .. } | CheckKind::Network { .. } | CheckKind::SystemTuning => {
+            CheckKind::TimeSync { .. }
+            | CheckKind::Network { .. }
+            | CheckKind::LiveMmEntry { .. }
+            | CheckKind::SystemTuning => {
                 if let Some(item) = observation {
                     platform.push(format!("{}: {}", check.name, item.summary));
                 }
