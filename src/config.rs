@@ -167,6 +167,7 @@ pub struct DeliveryConfig {
     pub signed: bool,
     #[serde(default = "default_token_env")]
     pub token_env: String,
+    pub statistics_token_env: Option<String>,
     #[serde(default = "default_secret_env")]
     pub secret_env: String,
     #[serde(default = "default_timeout")]
@@ -188,6 +189,7 @@ impl Default for DeliveryConfig {
         Self {
             signed: default_signed(),
             token_env: default_token_env(),
+            statistics_token_env: None,
             secret_env: default_secret_env(),
             timeout: default_timeout(),
             queue_capacity: default_capacity(),
@@ -816,6 +818,30 @@ pub fn resolve_dingtalk_credentials(
                 "DingTalk signing secret cannot be empty".into(),
             ));
         }
+        Some(value)
+    } else {
+        None
+    };
+    Ok((token, secret))
+}
+
+pub fn resolve_statistics_dingtalk_credentials(
+    config: &DeliveryConfig,
+) -> Result<(String, Option<String>), ConfigError> {
+    let Some(environment) = &config.statistics_token_env else {
+        return resolve_dingtalk_credentials(config);
+    };
+    let token = std::env::var(environment)
+        .map_err(|_| ConfigError::Invalid(format!("environment {environment} is missing")))?;
+    if token.is_empty() {
+        return Err(ConfigError::Invalid(
+            "DingTalk statistics token cannot be empty".into(),
+        ));
+    }
+    let secret = if config.signed {
+        let value = std::env::var(&config.secret_env).map_err(|_| {
+            ConfigError::Invalid(format!("environment {} is missing", config.secret_env))
+        })?;
         Some(value)
     } else {
         None

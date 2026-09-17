@@ -17,6 +17,7 @@ collect_fail_after_n = 3
 [delivery]
 signed = false
 token_env = "ALERTD_LIVE_MM_DINGTALK_TOKEN"
+statistics_token_env = "ALERTD_LIVE_MM_STATISTICS_DINGTALK_TOKEN"
 secret_env = "ALERTD_LIVE_MM_DINGTALK_SECRET"
 timeout = "3s"
 queue_capacity = 1024

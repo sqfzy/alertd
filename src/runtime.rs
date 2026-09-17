@@ -2,7 +2,10 @@ use crate::{
     alarm::{self, AlarmPolicy},
     collectors::{self, CollectContext},
     config::{self, CheckConfig, Config},
-    delivery::{dingtalk::DingTalkClient, queue::DeliveryQueue},
+    delivery::{
+        dingtalk::DingTalkClient,
+        queue::{DeliveryChannel, DeliveryQueue},
+    },
     model::{CheckState, Observation, Severity},
     report,
     state::{self, PersistentState},
@@ -87,17 +90,18 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
     let dingtalk = if options.dry_run {
         None
     } else {
-        Some(build_client(&config)?)
+        Some((build_client(&config)?, build_statistics_client(&config)?))
     };
     let stop = Arc::new(AtomicBool::new(false));
     let reload = Arc::new(AtomicBool::new(false));
     flag::register(SIGINT, stop.clone())?;
     flag::register(SIGTERM, stop.clone())?;
     flag::register(SIGHUP, reload.clone())?;
-    let delivery_worker = dingtalk.map(|client| {
+    let delivery_worker = dingtalk.map(|(alert_client, statistics_client)| {
         start_delivery_worker(
             queue.clone(),
-            client,
+            alert_client,
+            statistics_client,
             &config,
             identity.clone(),
             stop.clone(),
@@ -413,11 +417,16 @@ enum DrainOutcome {
 
 fn drain_once(
     queue: &DeliveryQueue,
-    client: &DingTalkClient,
+    alert_client: &DingTalkClient,
+    statistics_client: &DingTalkClient,
     context: report::ReportContext<'_>,
 ) -> DrainOutcome {
     match queue.oldest() {
         Ok(Some((path, message))) => {
+            let client = match message.channel {
+                DeliveryChannel::Alert => alert_client,
+                DeliveryChannel::Statistics => statistics_client,
+            };
             match client.send(&message.text, message.severity == Severity::Critical) {
                 Ok(()) => {
                     if let Err(error) = queue.acknowledge(&path) {
@@ -457,7 +466,8 @@ fn drain_once(
 
 fn start_delivery_worker(
     queue: DeliveryQueue,
-    client: DingTalkClient,
+    alert_client: DingTalkClient,
+    statistics_client: DingTalkClient,
     config: &Config,
     identity: Arc<RwLock<RuntimeIdentity>>,
     stop: Arc<AtomicBool>,
@@ -478,7 +488,7 @@ fn start_delivery_worker(
                 host: &current.host,
                 ip: current.ip.as_deref(),
             };
-            match drain_once(&queue, &client, context) {
+            match drain_once(&queue, &alert_client, &statistics_client, context) {
                 DrainOutcome::Failed => {
                     consecutive_failures = consecutive_failures.saturating_add(1);
                     degraded |= consecutive_failures >= failure_report_after;
@@ -597,13 +607,35 @@ fn maybe_statistics_reports(
         let Some(body) = observation.details.get("策略统计") else {
             continue;
         };
-        if enqueue(
+        if enqueue_statistics(
             queue,
             Severity::Ok,
             report::format_statistics(report_context, body),
             dry_run,
         ) {
             state.last_statistics_report_bucket = Some(bucket);
+        }
+    }
+}
+
+fn enqueue_statistics(
+    queue: &DeliveryQueue,
+    severity: Severity,
+    text: String,
+    dry_run: bool,
+) -> bool {
+    if dry_run {
+        println!("--- alertd statistics dry-run ---\n{text}\n");
+        return true;
+    }
+    match queue.enqueue_statistics(severity, text) {
+        Ok(id) => {
+            info!(%id, "statistics report queued");
+            true
+        }
+        Err(error) => {
+            error!(%error, "STATISTICS REPORT LOST: durable queue rejected message");
+            false
         }
     }
 }
@@ -717,6 +749,16 @@ fn build_client(config: &Config) -> Result<DingTalkClient, RuntimeError> {
         secret,
         config::parse_duration(&config.delivery.timeout)?,
         config.delivery.at_all_on_critical,
+    )?)
+}
+
+fn build_statistics_client(config: &Config) -> Result<DingTalkClient, RuntimeError> {
+    let (token, secret) = config::resolve_statistics_dingtalk_credentials(&config.delivery)?;
+    Ok(DingTalkClient::new(
+        token,
+        secret,
+        config::parse_duration(&config.delivery.timeout)?,
+        false,
     )?)
 }
 

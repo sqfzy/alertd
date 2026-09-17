@@ -9,6 +9,14 @@ use std::{
 };
 use thiserror::Error;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryChannel {
+    #[default]
+    Alert,
+    Statistics,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct QueuedMessage {
     pub id: String,
@@ -17,6 +25,8 @@ pub struct QueuedMessage {
     pub attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_name: Option<String>,
+    #[serde(default)]
+    pub channel: DeliveryChannel,
 }
 
 #[derive(Debug, Error)]
@@ -45,7 +55,27 @@ impl DeliveryQueue {
     }
 
     pub fn enqueue(&self, severity: Severity, text: String) -> Result<String, QueueError> {
-        self.enqueue_with_limit(severity, text, None, self.capacity.saturating_sub(1))
+        self.enqueue_with_limit(
+            severity,
+            text,
+            None,
+            DeliveryChannel::Alert,
+            self.capacity.saturating_sub(1),
+        )
+    }
+
+    pub fn enqueue_statistics(
+        &self,
+        severity: Severity,
+        text: String,
+    ) -> Result<String, QueueError> {
+        self.enqueue_with_limit(
+            severity,
+            text,
+            None,
+            DeliveryChannel::Statistics,
+            self.capacity.saturating_sub(1),
+        )
     }
 
     pub fn enqueue_check(
@@ -58,12 +88,13 @@ impl DeliveryQueue {
             severity,
             text,
             Some(check_name.to_owned()),
+            DeliveryChannel::Alert,
             self.capacity.saturating_sub(1),
         )
     }
 
     pub fn enqueue_internal(&self, severity: Severity, text: String) -> Result<String, QueueError> {
-        self.enqueue_with_limit(severity, text, None, self.capacity)
+        self.enqueue_with_limit(severity, text, None, DeliveryChannel::Alert, self.capacity)
     }
 
     fn enqueue_with_limit(
@@ -71,6 +102,7 @@ impl DeliveryQueue {
         severity: Severity,
         text: String,
         check_name: Option<String>,
+        channel: DeliveryChannel,
         limit: usize,
     ) -> Result<String, QueueError> {
         if self.pending_paths()?.len() >= limit {
@@ -87,6 +119,7 @@ impl DeliveryQueue {
             text,
             attempts: 0,
             check_name,
+            channel,
         };
         let temporary = self.root.join(format!(".{id}.tmp"));
         let final_path = self.root.join(format!("{id}.json"));
@@ -227,5 +260,17 @@ mod tests {
             serde_json::from_str(r#"{"id":"old","severity":"warn","text":"legacy","attempts":0}"#)
                 .unwrap();
         assert_eq!(message.check_name, None);
+        assert_eq!(message.channel, DeliveryChannel::Alert);
+    }
+
+    #[test]
+    fn persists_statistics_delivery_channel() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = DeliveryQueue::open(temp.path(), 16).unwrap();
+        queue
+            .enqueue_statistics(Severity::Ok, "statistics".into())
+            .unwrap();
+        let (_, message) = queue.oldest().unwrap().unwrap();
+        assert_eq!(message.channel, DeliveryChannel::Statistics);
     }
 }
