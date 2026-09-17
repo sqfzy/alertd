@@ -161,31 +161,6 @@ secret_env = "ALERTD_TEST_MISSING_SECRET"
 }
 
 #[test]
-fn statistics_delivery_uses_its_own_token_when_configured() {
-    let config: Config = toml::from_str(
-        r#"
-[delivery]
-signed = false
-token_env = "ALERTD_TEST_ALERT_TOKEN"
-statistics_token_env = "ALERTD_TEST_STATISTICS_TOKEN"
-"#,
-    )
-    .unwrap();
-    unsafe {
-        std::env::set_var("ALERTD_TEST_ALERT_TOKEN", "alert-token");
-        std::env::set_var("ALERTD_TEST_STATISTICS_TOKEN", "statistics-token");
-    }
-    let alert = config::resolve_dingtalk_credentials(&config.delivery).unwrap();
-    let statistics = config::resolve_statistics_dingtalk_credentials(&config.delivery).unwrap();
-    unsafe {
-        std::env::remove_var("ALERTD_TEST_ALERT_TOKEN");
-        std::env::remove_var("ALERTD_TEST_STATISTICS_TOKEN");
-    }
-    assert_eq!(alert.0, "alert-token");
-    assert_eq!(statistics.0, "statistics-token");
-}
-
-#[test]
 fn signed_delivery_remains_the_default() {
     let config: Config = toml::from_str("").unwrap();
     assert!(config.delivery.signed);

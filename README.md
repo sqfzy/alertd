@@ -38,8 +38,6 @@ alertd --config /etc/alertd/alertd.toml --send-test
 - `live_mm_entry`：一次读取多个 live_mm unit 的入口位、运行时风险位和已提交策略统计快照；可按北京时间整点时间桶发送汇总。
 
 `live_mm_entry` 的统计配置保持向后兼容：`statistics_report_every` 默认 `off`；启用周期报告时必须同时配置 `statistics_stale_after`（30 秒至 5 分钟）。统计行只有在同一 `snapshot_id` 的最终 `event=strategy_stats` 出现后才会被采用，孤立逐币行不会进入报告。
-
-可通过 `delivery.statistics_token_env` 将周期统计投递到独立机器人；未配置时继续复用 `delivery.token_env`。持久队列记录 `alert` 或 `statistics` 投递通道，旧队列消息缺省为 `alert`。
 - `systemd`：通过 `systemctl show` 检查一组 service/timer 是否均为 loaded、active。
 - `latest_file`：按目录、前后缀选择最新普通文件，检查最小大小和 mtime 新鲜度，适用于滚动 raw/因子文件。
 - `disk`：按挂载点容量和 inode 已用比例分级，取更高严重度。
