@@ -152,7 +152,9 @@ fn evaluate(
     } else {
         Observation::unhealthy(&check.name, Severity::Critical, summary)
     };
-    let mut observation = observation.detail("实例状态", details.join("\n"));
+    // DingTalk Markdown collapses single newlines inside a field. A blank line keeps
+    // each documented instance-state record on its own visible line.
+    let mut observation = observation.detail("实例状态", details.join("\n\n"));
     if statistics_stale_after.is_some() {
         observation = observation.detail(
             "策略统计",
@@ -374,8 +376,9 @@ fn format_statistics_report(
             .signed_duration_since(snapshot.observed_at)
             .num_seconds()
             .max(0);
+        let window = statistics_window(fields);
         output.push(format!(
-            "{}\n入口：{}｜风险：0x{}｜样本年龄：{}s\n权益：{}｜gross：{}｜net：{}\n活动：open {}｜maker {}｜taker {}｜episodes {}\n近30s：open {}｜close {}｜fills {}｜fail {}",
+            "{}\n\n入口：{}｜风险：0x{}｜样本年龄：{}s\n\n权益：{}｜gross：{}｜net：{}\n\n活动：open {}｜maker {}｜taker {}｜episodes {}\n\n近{}：open {}｜close {}｜fills {}｜fail {}",
             instance.name,
             if number(fields, "entries_enabled") == "1" { "开" } else { "关" },
             number(fields, "runtime_risk_mask"),
@@ -385,6 +388,7 @@ fn format_statistics_report(
             usdt(fields, "exposure_valid", "net_exposure_1e8"),
             number(fields, "active_open"), number(fields, "active_maker"),
             number(fields, "active_taker"), number(fields, "active_episodes"),
+            window,
             number(fields, "open_delta"), number(fields, "close_delta"),
             number(fields, "fills_delta"), number(fields, "place_fail_delta"),
         ));
@@ -394,7 +398,7 @@ fn format_statistics_report(
                 output.push(format!(
                     "- {} position={} exposure={} account_age={}ms active={}/{}/{} episodes={}",
                     number(symbol, "coin"),
-                    number(symbol, "position_1e8"),
+                    fixed_1e8(symbol, "position_1e8"),
                     usdt(symbol, "priced", "signed_exposure_1e8"),
                     number(symbol, "account_age_ms"),
                     number(symbol, "active_open"),
@@ -405,7 +409,34 @@ fn format_statistics_report(
             }
         }
     }
-    output.join("\n")
+    output.join("\n\n")
+}
+
+fn statistics_window(fields: &HashMap<String, String>) -> String {
+    let milliseconds = fields
+        .get("delta_window_ms")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30_000);
+    if milliseconds % 1_000 == 0 {
+        format!("{}s", milliseconds / 1_000)
+    } else {
+        format!("{:.3}s", milliseconds as f64 / 1_000.0)
+    }
+}
+
+fn fixed_1e8(fields: &HashMap<String, String>, name: &str) -> String {
+    let Ok(value) = number(fields, name).parse::<i128>() else {
+        return "unknown".into();
+    };
+    let sign = if value < 0 { "-" } else { "" };
+    let absolute = value.unsigned_abs();
+    let integer = absolute / 100_000_000;
+    let fraction = absolute % 100_000_000;
+    if fraction == 0 {
+        return format!("{sign}{integer}");
+    }
+    let fraction = format!("{fraction:08}").trim_end_matches('0').to_owned();
+    format!("{sign}{integer}.{fraction}")
 }
 
 fn latest_by_unit(rows: &[JournalState]) -> HashMap<&str, &JournalState> {
@@ -646,7 +677,7 @@ mod tests {
             });
             rows.push(JournalState {
                 unit: instance.unit,
-                message: "[INFO] event=strategy_stats snapshot_id=7 account_readable=1 equity_valid=1 equity_1e8=10000000000 equity_age_ms=3 exposure_valid=1 gross_exposure_1e8=125000000 net_exposure_1e8=125000000 nonzero_positions=1 unpriced_positions=0 entries_enabled=1 operator_enabled=1 runtime_risk_mask=00000000 active_open=1 active_maker=0 active_taker=0 active_episodes=1 open_delta=1 close_delta=0 fills_delta=0 place_fail_delta=0".into(),
+                message: "[INFO] event=strategy_stats snapshot_id=7 account_readable=1 equity_valid=1 equity_1e8=10000000000 equity_age_ms=3 exposure_valid=1 gross_exposure_1e8=125000000 net_exposure_1e8=125000000 nonzero_positions=1 unpriced_positions=0 entries_enabled=1 operator_enabled=1 runtime_risk_mask=00000000 active_open=1 active_maker=0 active_taker=0 active_episodes=1 delta_window_ms=30241 open_delta=1 close_delta=0 fills_delta=0 place_fail_delta=0".into(),
                 observed_at: Utc.timestamp_opt(102, 0).unwrap(),
             });
         }
@@ -664,7 +695,8 @@ mod tests {
         ));
         let report = &observation.details["策略统计"];
         assert!(report.contains("总体：4/4盘有统计｜入口开启 4｜风险盘 0"));
-        assert!(report.contains("APE position=100000000 exposure=1.25 U"));
+        assert!(report.contains("近30.241s：open 1｜close 0｜fills 0｜fail 0"));
+        assert!(report.contains("APE position=1 exposure=1.25 U"));
     }
 
     #[test]

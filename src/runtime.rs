@@ -600,7 +600,7 @@ fn maybe_statistics_reports(
         if enqueue(
             queue,
             Severity::Ok,
-            report::format_statistics(report_context, body),
+            report::format_statistics(report_context, interval, body),
             dry_run,
         ) {
             state.last_statistics_report_bucket = Some(bucket);
