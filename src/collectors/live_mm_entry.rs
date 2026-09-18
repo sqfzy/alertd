@@ -3,10 +3,13 @@ use super::CollectError;
 use super::command;
 use crate::{
     config::{self, CheckConfig, LiveMmInstance},
-    model::{Observation, Severity},
+    model::{Observation, Severity, StatisticsCounters},
 };
 use chrono::{DateTime, Utc};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EntryState {
@@ -160,6 +163,10 @@ fn evaluate(
             "策略统计",
             format_statistics_report(instances, &statistics, now),
         );
+        observation = observation.detail(
+            "_statistics_counters",
+            statistics_counters(instances, &statistics),
+        );
     }
     observation
 }
@@ -237,6 +244,10 @@ fn valid_statistics_fields(fields: &HashMap<String, String>) -> bool {
         "active_maker",
         "active_taker",
         "active_episodes",
+        "open_total",
+        "close_total",
+        "fills_total",
+        "place_fail_total",
         "open_delta",
         "close_delta",
         "fills_delta",
@@ -256,6 +267,31 @@ fn valid_statistics_fields(fields: &HashMap<String, String>) -> bool {
         && fields
             .get("runtime_risk_mask")
             .is_some_and(|value| u32::from_str_radix(value.trim_start_matches("0x"), 16).is_ok())
+}
+
+fn statistics_counters(
+    instances: &[LiveMmInstance],
+    statistics: &HashMap<&str, StrategyStats>,
+) -> String {
+    let counters = instances
+        .iter()
+        .filter_map(|instance| {
+            let snapshot = statistics.get(instance.unit.as_str())?;
+            let fields = &snapshot.fields;
+            Some((
+                instance.name.clone(),
+                StatisticsCounters {
+                    observed_at: snapshot.observed_at,
+                    snapshot_id: snapshot.snapshot_id,
+                    open_total: fields.get("open_total")?.parse().ok()?,
+                    close_total: fields.get("close_total")?.parse().ok()?,
+                    fills_total: fields.get("fills_total")?.parse().ok()?,
+                    place_fail_total: fields.get("place_fail_total")?.parse().ok()?,
+                },
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    serde_json::to_string(&counters).unwrap_or_else(|_| "{}".into())
 }
 
 fn valid_symbol_fields(fields: &HashMap<String, String>) -> bool {
@@ -677,7 +713,7 @@ mod tests {
             });
             rows.push(JournalState {
                 unit: instance.unit,
-                message: "[INFO] event=strategy_stats snapshot_id=7 account_readable=1 equity_valid=1 equity_1e8=10000000000 equity_age_ms=3 exposure_valid=1 gross_exposure_1e8=125000000 net_exposure_1e8=125000000 nonzero_positions=1 unpriced_positions=0 entries_enabled=1 operator_enabled=1 runtime_risk_mask=00000000 active_open=1 active_maker=0 active_taker=0 active_episodes=1 delta_window_ms=30241 open_delta=1 close_delta=0 fills_delta=0 place_fail_delta=0".into(),
+                message: "[INFO] event=strategy_stats snapshot_id=7 account_readable=1 equity_valid=1 equity_1e8=10000000000 equity_age_ms=3 exposure_valid=1 gross_exposure_1e8=125000000 net_exposure_1e8=125000000 nonzero_positions=1 unpriced_positions=0 entries_enabled=1 operator_enabled=1 runtime_risk_mask=00000000 active_open=1 active_maker=0 active_taker=0 active_episodes=1 open_total=10 close_total=9 fills_total=8 place_fail_total=0 delta_window_ms=30241 open_delta=1 close_delta=0 fills_delta=0 place_fail_delta=0".into(),
                 observed_at: Utc.timestamp_opt(102, 0).unwrap(),
             });
         }
@@ -697,6 +733,7 @@ mod tests {
         assert!(report.contains("总体：4/4盘有统计｜入口开启 4｜风险盘 0"));
         assert!(report.contains("近30.241s：open 1｜close 0｜fills 0｜fail 0"));
         assert!(report.contains("APE position=1 exposure=1.25 U"));
+        assert!(observation.details["_statistics_counters"].contains("\"open_total\":10"));
     }
 
     #[test]

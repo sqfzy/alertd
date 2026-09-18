@@ -597,15 +597,93 @@ fn maybe_statistics_reports(
         let Some(body) = observation.details.get("策略统计") else {
             continue;
         };
+        let Some(raw_counters) = observation.details.get("_statistics_counters") else {
+            continue;
+        };
+        let Ok(counters) = serde_json::from_str::<
+            std::collections::BTreeMap<String, crate::model::StatisticsCounters>,
+        >(raw_counters) else {
+            continue;
+        };
+        let (body, next_baselines) = statistics_report_body(
+            body,
+            interval,
+            &counters,
+            &state.statistics_report_baselines,
+        );
         if enqueue(
             queue,
             Severity::Ok,
-            report::format_statistics(report_context, interval, body),
+            report::format_statistics(report_context, interval, &body),
             dry_run,
         ) {
             state.last_statistics_report_bucket = Some(bucket);
+            state.statistics_report_baselines = next_baselines;
         }
     }
+}
+
+fn statistics_report_body(
+    body: &str,
+    interval: std::time::Duration,
+    counters: &std::collections::BTreeMap<String, crate::model::StatisticsCounters>,
+    baselines: &std::collections::BTreeMap<String, crate::model::StatisticsBaseline>,
+) -> (
+    String,
+    std::collections::BTreeMap<String, crate::model::StatisticsBaseline>,
+) {
+    let label = format!("近{}min", interval.as_secs() / 60);
+    let mut current_instance: Option<&str> = None;
+    let mut output = Vec::new();
+    for line in body.lines() {
+        if counters.contains_key(line) {
+            current_instance = Some(line);
+            output.push(line.to_owned());
+            continue;
+        }
+        if line.starts_with("近") {
+            let replacement = current_instance
+                .and_then(|name| counters.get(name).map(|current| (name, current)))
+                .map(|(name, current)| {
+                    baselines
+                        .get(name)
+                        .filter(|previous| current.snapshot_id > previous.snapshot_id)
+                        .and_then(|previous| {
+                            Some(format!(
+                                "{label}：open {}｜close {}｜fills {}｜fail {}",
+                                current.open_total.checked_sub(previous.open_total)?,
+                                current.close_total.checked_sub(previous.close_total)?,
+                                current.fills_total.checked_sub(previous.fills_total)?,
+                                current
+                                    .place_fail_total
+                                    .checked_sub(previous.place_fail_total)?,
+                            ))
+                        })
+                        .unwrap_or_else(|| format!("{label}：基线建立中"))
+                })
+                .unwrap_or_else(|| line.to_owned());
+            output.push(replacement);
+            continue;
+        }
+        output.push(line.to_owned());
+    }
+    let next = counters
+        .iter()
+        .map(|(name, current)| {
+            (
+                name.clone(),
+                crate::model::StatisticsBaseline {
+                    observed_at: current.observed_at,
+                    snapshot_id: current.snapshot_id,
+                    open_total: current.open_total,
+                    close_total: current.close_total,
+                    fills_total: current.fills_total,
+                    place_fail_total: current.place_fail_total,
+                },
+            )
+        })
+        .collect();
+    (output.join("\n"), next)
 }
 
 fn reload_config(
@@ -863,5 +941,80 @@ critical_available_pct = 10
         assert!(persistent.checks.contains_key("memory/collector"));
         assert!(!persistent.checks.contains_key("removed"));
         assert!(persistent.journal_cursors.is_empty());
+    }
+
+    fn counters(
+        snapshot_id: u64,
+        open: u64,
+        close: u64,
+        fills: u64,
+        fail: u64,
+    ) -> std::collections::BTreeMap<String, crate::model::StatisticsCounters> {
+        std::collections::BTreeMap::from([(
+            "live_mm2".into(),
+            crate::model::StatisticsCounters {
+                observed_at: Utc::now(),
+                snapshot_id,
+                open_total: open,
+                close_total: close,
+                fills_total: fills,
+                place_fail_total: fail,
+            },
+        )])
+    }
+
+    #[test]
+    fn statistics_report_establishes_first_baseline() {
+        let body = "live_mm2\n\n近30s：open 1｜close 2｜fills 3｜fail 0";
+        let (rendered, next) = statistics_report_body(
+            body,
+            Duration::from_secs(600),
+            &counters(10, 100, 90, 80, 2),
+            &Default::default(),
+        );
+        assert!(rendered.contains("近10min：基线建立中"));
+        assert_eq!(next["live_mm2"].open_total, 100);
+    }
+
+    #[test]
+    fn statistics_report_uses_difference_from_previous_report() {
+        let previous = crate::model::StatisticsBaseline {
+            observed_at: Utc::now(),
+            snapshot_id: 10,
+            open_total: 100,
+            close_total: 90,
+            fills_total: 80,
+            place_fail_total: 2,
+        };
+        let body = "live_mm2\n\n近30s：open 1｜close 2｜fills 3｜fail 0";
+        let (rendered, _) = statistics_report_body(
+            body,
+            Duration::from_secs(600),
+            &counters(30, 107, 95, 89, 3),
+            &std::collections::BTreeMap::from([("live_mm2".into(), previous)]),
+        );
+        assert!(rendered.contains("近10min：open 7｜close 5｜fills 9｜fail 1"));
+        assert!(!rendered.contains("近30s"));
+    }
+
+    #[test]
+    fn statistics_report_rebuilds_baseline_after_process_restart() {
+        let previous = crate::model::StatisticsBaseline {
+            observed_at: Utc::now(),
+            snapshot_id: 30,
+            open_total: 100,
+            close_total: 90,
+            fills_total: 80,
+            place_fail_total: 2,
+        };
+        let body = "live_mm2\n\n近30s：open 1｜close 2｜fills 3｜fail 0";
+        let (rendered, next) = statistics_report_body(
+            body,
+            Duration::from_secs(600),
+            &counters(2, 1, 1, 1, 0),
+            &std::collections::BTreeMap::from([("live_mm2".into(), previous)]),
+        );
+        assert!(rendered.contains("近10min：基线建立中"));
+        assert_eq!(next["live_mm2"].snapshot_id, 2);
     }
 }

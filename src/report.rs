@@ -40,7 +40,7 @@ pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
             .to_string(),
     );
     for (key, value) in &event.details {
-        if !value.is_empty() {
+        if !key.starts_with('_') && !value.is_empty() {
             push_field(&mut text, key, value);
         }
     }

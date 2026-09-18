@@ -34,6 +34,36 @@ fn alert_fields_are_separate_markdown_paragraphs() {
 }
 
 #[test]
+fn alert_hides_internal_detail_fields() {
+    let event = AlertEvent {
+        check_name: "live-mm-entry".into(),
+        severity: Severity::Critical,
+        transition: Transition::Firing,
+        started_at: Utc::now(),
+        observed_at: Utc::now(),
+        summary: "异常".into(),
+        details: BTreeMap::from([
+            ("实例状态".into(), "live_mm2 risk=0x1".into()),
+            (
+                "_statistics_counters".into(),
+                "secret-internal-state".into(),
+            ),
+        ]),
+        runbook: None,
+    };
+    let text = report::format_alert(
+        ReportContext {
+            host: "bn-okx-gateway-live-mm",
+            ip: Some("54.178.56.195"),
+        },
+        &event,
+    );
+    assert!(text.contains("live_mm2 risk=0x1"));
+    assert!(!text.contains("secret-internal-state"));
+    assert!(!text.contains("_statistics_counters"));
+}
+
+#[test]
 fn recovery_shows_readable_duration_and_recovery_time() {
     let event = AlertEvent {
         check_name: "data-disk".into(),
