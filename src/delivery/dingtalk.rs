@@ -72,25 +72,6 @@ impl DingTalkClient {
     }
 }
 
-fn endpoint(token: &str, secret: Option<&str>, now: SystemTime) -> Result<String, DingTalkError> {
-    let base = format!(
-        "https://oapi.dingtalk.com/robot/send?access_token={}",
-        urlencoding::encode(token)
-    );
-    let Some(secret) = secret else {
-        return Ok(base);
-    };
-    let timestamp = now
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| DingTalkError::Clock)?
-        .as_millis();
-    let signature = sign(timestamp, secret);
-    Ok(format!(
-        "{base}&timestamp={timestamp}&sign={}",
-        urlencoding::encode(&signature)
-    ))
-}
-
 pub fn sign(timestamp_ms: u128, secret: &str) -> String {
     let content = format!("{timestamp_ms}\n{secret}");
     let mut mac =

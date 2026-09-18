@@ -63,7 +63,7 @@ instances = [
   { name = "live_mm1", unit = "live-mm-v0.service" },
   { name = "live_mm2", unit = "live-mm-v0@account8.service" },
 ]
-stale_after = "20s"
+stale_after = "30s"
 
 [[checks]]
 name = "bybit-book"

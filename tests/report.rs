@@ -64,13 +64,7 @@ fn alert_hides_internal_detail_fields() {
         ]),
         runbook: None,
     };
-    let text = report::format_alert(
-        ReportContext {
-            host: "bn-okx-gateway-live-mm",
-            ip: Some("54.178.56.195"),
-        },
-        &event,
-    );
+    let text = report::format_alert(context(Some("54.178.56.195")), &event);
     assert!(text.contains("live_mm2 risk=0x1"));
     assert!(!text.contains("secret-internal-state"));
     assert!(!text.contains("_statistics_counters"));
@@ -108,6 +102,20 @@ fn alert_omits_unconfigured_ip() {
     };
 
     assert!(!report::format_alert(context(None), &event).contains("**IP：**"));
+}
+
+#[test]
+fn statistics_report_shows_previous_complete_beijing_period() {
+    let text = report::format_statistics(
+        context(Some("54.178.56.195")),
+        std::time::Duration::from_secs(600),
+        Utc.with_ymd_and_hms(2026, 9, 18, 5, 37, 42).unwrap(),
+        "**总体**\n\n统计：3/3",
+    );
+    assert!(
+        text.contains("**统计时间段：** 2026-09-18 13:20:00 ～ 2026-09-18 13:30:00（UTC+08:00）")
+    );
+    assert!(text.contains("**总体**\n\n统计：3/3"));
 }
 
 #[test]

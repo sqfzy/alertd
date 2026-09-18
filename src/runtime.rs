@@ -139,7 +139,7 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
             &queue,
             options.dry_run,
         );
-        run_monitoring_cycle(
+        let observations = run_monitoring_cycle(
             &config,
             report_context,
             &mut persistent,
@@ -1482,5 +1482,80 @@ critical_available_pct = 10
                 .map(String::as_str),
             Some("pending")
         );
+    }
+
+    fn statistics_counters(
+        snapshot_id: u64,
+        open: u64,
+        close: u64,
+        fills: u64,
+        fail: u64,
+    ) -> std::collections::BTreeMap<String, crate::model::StatisticsCounters> {
+        std::collections::BTreeMap::from([(
+            "live_mm2".into(),
+            crate::model::StatisticsCounters {
+                observed_at: Utc::now(),
+                snapshot_id,
+                open_total: open,
+                close_total: close,
+                fills_total: fills,
+                place_fail_total: fail,
+            },
+        )])
+    }
+
+    #[test]
+    fn statistics_report_establishes_first_baseline() {
+        let body = "**live_mm2**\n\n近30s：open 1｜close 2｜fills 3｜fail 0";
+        let (rendered, next) = statistics_report_body(
+            body,
+            Duration::from_secs(600),
+            &statistics_counters(10, 100, 90, 80, 2),
+            &Default::default(),
+        );
+        assert!(rendered.contains("近10min：基线建立中"));
+        assert_eq!(next["live_mm2"].open_total, 100);
+    }
+
+    #[test]
+    fn statistics_report_uses_difference_from_previous_report() {
+        let previous = crate::model::StatisticsBaseline {
+            observed_at: Utc::now(),
+            snapshot_id: 10,
+            open_total: 100,
+            close_total: 90,
+            fills_total: 80,
+            place_fail_total: 2,
+        };
+        let body = "**live_mm2**\n\n近30s：open 1｜close 2｜fills 3｜fail 0";
+        let (rendered, _) = statistics_report_body(
+            body,
+            Duration::from_secs(600),
+            &statistics_counters(30, 107, 95, 89, 3),
+            &std::collections::BTreeMap::from([("live_mm2".into(), previous)]),
+        );
+        assert!(rendered.contains("近10min：open 7｜close 5｜fills 9｜fail 1"));
+        assert!(!rendered.contains("近30s"));
+    }
+
+    #[test]
+    fn statistics_report_rebuilds_baseline_after_process_restart() {
+        let previous = crate::model::StatisticsBaseline {
+            observed_at: Utc::now(),
+            snapshot_id: 30,
+            open_total: 100,
+            close_total: 90,
+            fills_total: 80,
+            place_fail_total: 2,
+        };
+        let body = "**live_mm2**\n\n近30s：open 1｜close 2｜fills 3｜fail 0";
+        let (rendered, next) = statistics_report_body(
+            body,
+            Duration::from_secs(600),
+            &statistics_counters(2, 1, 1, 1, 0),
+            &std::collections::BTreeMap::from([("live_mm2".into(), previous)]),
+        );
+        assert!(rendered.contains("近10min：基线建立中"));
+        assert_eq!(next["live_mm2"].snapshot_id, 2);
     }
 }

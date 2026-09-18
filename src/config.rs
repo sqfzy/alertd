@@ -1032,7 +1032,11 @@ pub fn resolve_dingtalk_credentials(
     config: &DeliveryConfig,
 ) -> Result<(String, Option<String>), ConfigError> {
     let token = required_environment_value(&config.token_env, std::env::var(&config.token_env))?;
-    let secret = optional_environment_value(&config.secret_env, std::env::var(&config.secret_env))?;
+    let secret = if config.signed {
+        optional_environment_value(&config.secret_env, std::env::var(&config.secret_env))?
+    } else {
+        None
+    };
     Ok((token, secret))
 }
 

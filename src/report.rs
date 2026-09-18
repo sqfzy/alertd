@@ -2,7 +2,7 @@ use crate::{
     config::{CheckConfig, CheckKind},
     model::{AlertEvent, CheckState, Observation, ObservationStatus, Severity, Transition},
 };
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, Local, TimeZone, Utc};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug)]
@@ -34,15 +34,7 @@ pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
     push_identity(&mut text, context);
     push_field(&mut text, "检查", &event.check_name);
     push_field(&mut text, "状态", &event.summary);
-    push_field(
-        &mut text,
-        "异常开始",
-        &event
-            .started_at
-            .with_timezone(&Local)
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string(),
-    );
+    push_field(&mut text, "异常开始", &format_beijing(event.started_at));
     for (key, value) in &event.details {
         if !key.starts_with('_') && !value.is_empty() {
             push_field(&mut text, key, value);
@@ -220,7 +212,10 @@ pub fn format_daily(
                     journal_critical = journal_critical.saturating_add(state.daily_critical_count);
                 }
             }
-            CheckKind::TimeSync { .. } | CheckKind::Network { .. } | CheckKind::SystemTuning => {
+            CheckKind::TimeSync { .. }
+            | CheckKind::Network { .. }
+            | CheckKind::LiveMmEntry { .. }
+            | CheckKind::SystemTuning => {
                 platform.push(match observation {
                     Some(item) => format!("{}: {}", check.name, item.summary),
                     None => format_unavailable_check(check, observations),
@@ -295,6 +290,57 @@ pub fn format_test(context: ReportContext<'_>) -> String {
     push_identity(&mut text, context);
     push_field(&mut text, "状态", "配置与钉钉投递正常");
     text
+}
+
+pub fn format_statistics(
+    context: ReportContext<'_>,
+    interval: std::time::Duration,
+    observed_at: DateTime<Utc>,
+    body: &str,
+) -> String {
+    let minutes = interval.as_secs() / 60;
+    let mut text = format!("📊 **LIVE_MM · {minutes}分钟策略统计**");
+    push_field(&mut text, "主机", context.host);
+    if let Some(ip) = context.ip {
+        push_field(&mut text, "IP", ip);
+    }
+    push_field(
+        &mut text,
+        "统计时间段",
+        &statistics_period(observed_at, interval),
+    );
+    text.push_str("\n\n");
+    text.push_str(body);
+    text
+}
+
+pub fn beijing_time(value: DateTime<Utc>) -> DateTime<FixedOffset> {
+    value.with_timezone(&FixedOffset::east_opt(8 * 3600).expect("UTC+08:00 is valid"))
+}
+
+fn format_beijing(value: DateTime<Utc>) -> String {
+    beijing_time(value).format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn statistics_period(observed_at: DateTime<Utc>, interval: std::time::Duration) -> String {
+    let interval_seconds = interval.as_secs() as i64;
+    let beijing_seconds = observed_at.timestamp().saturating_add(8 * 3600);
+    let end_beijing_seconds = beijing_seconds.div_euclid(interval_seconds) * interval_seconds;
+    let start_beijing_seconds = end_beijing_seconds.saturating_sub(interval_seconds);
+    let offset = FixedOffset::east_opt(8 * 3600).expect("UTC+08:00 is valid");
+    let start = offset
+        .timestamp_opt(start_beijing_seconds.saturating_sub(8 * 3600), 0)
+        .single()
+        .expect("aligned report timestamp is valid");
+    let end = offset
+        .timestamp_opt(end_beijing_seconds.saturating_sub(8 * 3600), 0)
+        .single()
+        .expect("aligned report timestamp is valid");
+    format!(
+        "{} ～ {}（UTC+08:00）",
+        start.format("%Y-%m-%d %H:%M:%S"),
+        end.format("%Y-%m-%d %H:%M:%S")
+    )
 }
 
 fn is_healthy(observation: &Observation) -> bool {
