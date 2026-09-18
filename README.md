@@ -1,86 +1,110 @@
 # alertd
 
-`alertd` 是一个轻量、配置驱动的 Linux 告警守护程序。每台机器运行一个实例，监控应用链路、主机资源、校时、网络和低延迟运行态；异常、持续、恢复、事件和日报统一发到钉钉。
+`alertd` 是一个轻量、配置驱动的 Linux 告警守护程序。每台机器运行一个实例，监控应用链路和主机运行态；异常、持续、恢复、日志事件和日报统一发送到钉钉。
 
 ```text
 Collector → Observation → Alarm Engine → Event → Durable Queue → DingTalk
 ```
 
-项目刻意保持简单：一个 Rust 二进制、一份 TOML、一个 systemd unit；不依赖 Prometheus、数据库、中心服务或动态插件。
+一个 Rust 二进制、一份 TOML、一个 systemd unit；不依赖 Prometheus、数据库、中心服务或动态插件。
 
-## 构建与检查
+## 快速开始
 
 ```sh
 cargo build --release
-cargo test
-cargo clippy --all-targets -- -D warnings
+cp config/alertd.toml.example /etc/alertd/alertd.toml
+cp deploy/alertd.env.example /etc/alertd/alertd.env
+chmod 0600 /etc/alertd/alertd.env
+
+target/release/alertd --config /etc/alertd/alertd.toml --check-config
+target/release/alertd --config /etc/alertd/alertd.toml --dry-run
+target/release/alertd --config /etc/alertd/alertd.toml --send-test
 ```
 
-Linux 部署前先检查配置：
+最小配置：
+
+```toml
+[[checks]]
+name = "root-disk"
+type = "disk"
+mount = "/"
+warn_used_pct = 80
+critical_used_pct = 90
+```
+
+完整字段、默认值、范围和各类 check 示例以 [`config/alertd.toml.example`](config/alertd.toml.example) 为准。未知字段、重复 check 名称和非法范围会被拒绝。
+
+## 常用操作
 
 ```sh
+# 热加载；校验失败时继续使用旧配置
+systemctl reload alertd
+
+# 关闭全部 check 与日报：先将 runtime.enabled 改为 false 并校验
 alertd --config /etc/alertd/alertd.toml --check-config
-alertd --config /etc/alertd/alertd.toml --dry-run
-alertd --config /etc/alertd/alertd.toml --send-test
+systemctl reload alertd
+
+# 本地日志与服务状态
+systemctl status alertd
+journalctl -u alertd -n 200 --no-pager
 ```
 
-完整配置见 `config/alertd.toml.example`。未知字段、重复 check 名称和非法范围会被拒绝。钉钉密钥只从配置指定的环境变量读取；`/etc/alertd/alertd.env` 必须为 root 所有且权限 `0600`。
+进一步阅读：
 
-`runtime.host` 表示机器的稳定角色名，`runtime.ip` 可选，表示值班人员用于识别或连接该实例的主 IP。IP 不自动探测，避免多网卡、NAT 或隧道环境选错地址。
-
-修改 TOML 后向进程发送 `SIGHUP`。新配置会先被完整解析和校验；失败时继续运行旧配置。
+- [架构与一致性](docs/architecture.md)：状态机、journald 事件、cursor、持久队列和全局开关的不变量。
+- [部署与运维](docs/operations.md)：systemd 安装、热加载边界、监控开关、排障、升级和回滚。
+- [完整配置示例](config/alertd.toml.example)：严格 schema 的主要事实入口。
 
 ## Check 类型
 
-- `process`：扫描 `/proc/<pid>/cmdline`，检查匹配进程数量。
-- `shm`：支持 `exists`、`u64_counter` 和 `gconf_v2`；可只检查存在，也可检查进度停滞。`gconf_v2` 必须显式配置 ABI 的 `magic` 与 `layout_version`，BcastRing 按 head、Board 按 header heartbeat 与尾部 slot seqlock 判断进度；未知 SegKind fail-closed。
-- `journal`：按 systemd unit 读取 journald，使用普通、区分大小写的子串规则过滤已知噪声并区分 WARN/CRITICAL；`ignore_contains` 优先于告警规则。
-- `live_mm_entry`：一次读取多个 live_mm unit 的入口位、四类风险 mask 和已提交策略统计快照；可按北京时间整点时间桶发送汇总。四类风险为全局运行时、币级组合、账户级 order guard 与币级 order guard；任一非零或 `risk_state` 缺失均进入该检查配置的告警级别。
+- `process`：匹配进程命令行和最少实例数。
+- `shm`：检查 POSIX SHM 存在性或计数器推进。
+- `journal`：按 unit 和普通子串匹配事件，可优先过滤已知噪声。
+- `systemd`：检查一组 service/timer 的 loaded、active 状态。
+- `latest_file`：检查匹配文件的大小和 mtime 新鲜度。
+- `metrics_file`：读取原子覆盖的 JSON 数值快照，检查新鲜度和可选上下限，并纳入日报。
+- `metrics_shm`：可选校验 ABI 原始字节，定点读取固定类型数值，检查上下限并纳入日报。
+- `disk`：检查挂载点容量与 inode 使用率。
+- `memory`：按 `MemAvailable/MemTotal` 检查可用内存。
+- `cpu`：连续采样并显示每个逻辑 CPU 的使用率。
+- `time_sync`：通过 `chronyc -c tracking` 检查同步和时钟偏差。
+- `network`：检查接口链路及 error/drop 每秒速率。
+- `system_tuning`：只读检查当前低延迟运行态，不修改主机。
 
-`live_mm_entry` 的统计配置保持向后兼容：`statistics_report_every` 默认 `off`；启用周期报告时必须同时配置 `statistics_stale_after`（30 秒至 5 分钟）。统计行只有在同一 `snapshot_id` 的最终 `event=strategy_stats` 出现后才会被采用，孤立逐币行不会进入报告。
+所有 collector 只采集事实。统一告警状态机负责等待、升级、重复和恢复防抖；collector 连续失败会产生独立的采集盲区告警。
 
-周期报告中的“近 N 分钟”按相邻两次进入持久投递队列的报告累计计数求差，不使用最新一条 30 秒采样增量。alertd 首次启动、策略进程重启或累计计数回退时显示“基线建立中”，本次只保存新基线，不输出可能失真的区间计数。
-- `systemd`：通过 `systemctl show` 检查一组 service/timer 是否均为 loaded、active。
-- `latest_file`：按目录、前后缀选择最新普通文件，检查最小大小和 mtime 新鲜度，适用于滚动 raw/因子文件。
-- `disk`：按挂载点容量和 inode 已用比例分级，取更高严重度。
-- `memory`：按 `MemAvailable/MemTotal` 分级。
-- `cpu`：按 `/proc/stat` 连续采样计算每个逻辑 CPU 的使用率，告警和日报均显示全部核心。
-- `time_sync`：使用 `chronyc -c tracking` 检查同步状态和剩余时钟偏差。
-- `network`：检查指定接口链路状态，以及 RX/TX error/drop 每秒速率。
-- `system_tuning`：只读检查 `lat_tune.sh` 定义的当前内核、RT、irqbalance、IRQ、XPS/RPS 低延迟基线，不执行调优。
+`metrics_file` 的生产者负责聚合业务数据，并以“同目录临时文件 + 原子 rename”更新不超过 64 KiB 的顶层 JSON 对象。alertd 只读取配置选中的有限数值，不保存历史或计算 average/max/p99；统计窗口和单位应体现在稳定的 key 名中。
 
-所有 collector 只产出事实。统一告警状态机负责等待、升级、重复与恢复防抖；采集器连续失败会产生独立的“监控采集盲区”告警。journald 是事件型检查：命中会聚合和限频，不会因下一轮没有新日志而发送虚假恢复。
+`metrics_shm` 按 `runtime.interval` 打开 POSIX SHM 一次，通过同一文件描述符读取可选 ABI hash 和配置字段；支持大小端整数与浮点数。生产者必须以自然对齐的原子写更新单个字段。alertd 提供单值最佳努力采样，不保证多个字段属于同一事务；需要跨字段一致性时使用原子 JSON 快照，或另行设计 seqlock。
 
-`system_tuning` 严格检查当前运行态：CPU0 housekeeping、其余 present CPU 隔离，`isolcpus/nohz_full/rcu_nocbs`、`rcu_nocb_poll`、`irqaffinity=0`、`mitigations=off`、`nowatchdog`、`nosoftlockup`、RT throttle、irqbalance 和数据口 IRQ/XPS/RPS。基线来自 `lat_tune.sh` SHA-256 `27c6096d9b907b8207a5d440cce9c6c6ffce63d90a27ea37fc53870261377da8`。它不检查持久化文件，也不自动修复；`mitigations=off` 是以安全缓解换取延迟，只适用于受控隔离环境。
+两类数值检查都可独立配置 `critical_below`、`warn_below`、`warn_above` 和 `critical_above`。下限使用 `<=`、上限使用 `>=`，达到边界即越线；四项全空时只进入日报。alertd 不支持表达式、多段区间、跨指标计算或单位换算。
 
-## 可靠投递
-
-告警发送前以临时文件、`fsync` 和原子 rename 写入 `/var/lib/alertd/spool`，成功投递后才删除。重启后继续投递，模糊失败可能产生重复，但不会静默丢失。损坏队列文件会移动到 `spool/quarantine` 并在本地记录 ERROR。
-
-业务告警最多使用队列的 `capacity - 1` 个槽位，最后一个槽保留给 alertd 自监控。配置热加载失败、状态保存失败、队列接近上限、spool 损坏、异常重启和钉钉投递恢复都会进入同一持久队列。SIGHUP 只允许更新主机标识、采样周期、告警策略、日报时间和 checks；`state_dir`、日志级别、命令超时和 delivery 变化会拒绝整次热加载。
-
-## 消息示例
+## 文件组织
 
 ```text
-🔴 CRITICAL · 告警
-
-主机：bybit-sg
-
-IP：203.0.113.10
-
-检查：bybit-book
-
-状态：SHM 已 180 秒没有推进
-
-异常开始：2026-08-12 14:31:20
-
-对象：/shm_bybit_lin_book_tick_v2
-
-进度：812945
-
-处理：https://runbook.example/shm-stale
+alertd/
+├── src/
+│   ├── main.rs             CLI 与进程入口
+│   ├── config.rs           严格 TOML 数据模型与校验
+│   ├── runtime.rs          全局开关、采集、热加载、日报与自监控编排
+│   ├── alarm.rs            告警和日志事件状态机
+│   ├── model.rs            Observation、事件与状态 POD
+│   ├── report.rs           告警、内部事件和日报排版
+│   ├── collectors/         各 check 的只读事实采集器
+│   └── delivery/           持久队列与钉钉投递
+├── docs/
+│   ├── architecture.md     数据流与一致性不变量
+│   └── operations.md       部署、开关、排障与回滚
+├── config/                 完整配置示例与部署角色样例
+├── deploy/                 systemd unit 与环境文件示例
+└── tests/                  配置、collector 与报告集成测试
 ```
 
-## 首次上线
+## 本地验收
 
-先在非关键主机与旧 monitor 并行运行 24 小时，并使用测试钉钉群。确认异常、恢复、日报和网络中断补发后，再逐机切换；不要让两套 monitor 同时向正式群发送同一规则。
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+```

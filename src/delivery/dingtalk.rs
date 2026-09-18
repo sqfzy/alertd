@@ -42,13 +42,33 @@ impl DingTalkClient {
     }
 
     pub fn send(&self, text: &str, critical: bool) -> Result<(), DingTalkError> {
-        let url = endpoint(&self.token, self.secret.as_deref(), SystemTime::now())?;
+        let url = self.webhook_url()?;
         let response = self.client.post(url).json(&json!({"msgtype":"markdown","markdown":{"title":"alertd","text":text},"at":{"isAtAll": critical && self.at_all_on_critical}})).send()?.error_for_status()?;
         let value: serde_json::Value = response.json()?;
         if value.get("errcode").and_then(|v| v.as_i64()) != Some(0) {
             return Err(DingTalkError::Rejected(value.to_string()));
         }
         Ok(())
+    }
+
+    fn webhook_url(&self) -> Result<String, DingTalkError> {
+        let mut url = format!(
+            "https://oapi.dingtalk.com/robot/send?access_token={}",
+            urlencoding::encode(&self.token)
+        );
+        let Some(secret) = &self.secret else {
+            return Ok(url);
+        };
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| DingTalkError::Clock)?
+            .as_millis();
+        let signature = sign(timestamp, secret);
+        url.push_str(&format!(
+            "&timestamp={timestamp}&sign={}",
+            urlencoding::encode(&signature)
+        ));
+        Ok(url)
     }
 }
 
@@ -84,19 +104,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unsigned_endpoint_contains_only_the_token() {
-        let url = endpoint("a+b", None, UNIX_EPOCH).unwrap();
+    fn ip_whitelist_mode_omits_timestamp_and_signature() {
+        let client =
+            DingTalkClient::new("token value".into(), None, Duration::from_secs(1), false).unwrap();
+
+        let url = client.webhook_url().unwrap();
+
         assert_eq!(
             url,
-            "https://oapi.dingtalk.com/robot/send?access_token=a%2Bb"
+            "https://oapi.dingtalk.com/robot/send?access_token=token%20value"
         );
-        assert!(!url.contains("timestamp="));
-        assert!(!url.contains("sign="));
     }
 
     #[test]
-    fn signed_endpoint_keeps_the_existing_signature_contract() {
-        let url = endpoint("token", Some("secret"), UNIX_EPOCH).unwrap();
-        assert!(url.contains("access_token=token&timestamp=0&sign="));
+    fn signing_mode_includes_timestamp_and_signature() {
+        let client = DingTalkClient::new(
+            "token".into(),
+            Some("secret".into()),
+            Duration::from_secs(1),
+            false,
+        )
+        .unwrap();
+
+        let url = client.webhook_url().unwrap();
+
+        assert!(url.contains("&timestamp="));
+        assert!(url.contains("&sign="));
     }
 }

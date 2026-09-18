@@ -1,3 +1,5 @@
+//! Collector、告警引擎、报告层和持久状态之间共享的 POD 数据契约。
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -28,6 +30,7 @@ pub enum ObservationStatus {
 }
 
 #[derive(Clone, Debug)]
+/// Collector 在一个采样时刻观察到的事实，不包含等待或重复策略。
 pub struct Observation {
     pub check_name: String,
     pub status: ObservationStatus,
@@ -100,6 +103,7 @@ pub struct AlertEvent {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+/// 单个 check 跨采样、重启持久化的告警与日志事件状态。
 pub struct CheckState {
     pub pending_since: Option<DateTime<Utc>>,
     pub firing_since: Option<DateTime<Utc>>,

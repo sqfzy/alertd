@@ -1,8 +1,11 @@
+//! 守护进程编排：全局监控开关、采集、热加载、日报、自监控和有界关闭。
+
 use crate::{
     alarm::{self, AlarmPolicy},
     collectors::{self, CollectContext},
-    config::{self, CheckConfig, Config},
+    config::{self, CheckConfig, Config, LoadedConfig},
     delivery::{dingtalk::DingTalkClient, queue::DeliveryQueue},
+    identity::{self, RuntimeIdentity},
     model::{CheckState, Observation, Severity},
     report,
     state::{self, PersistentState},
@@ -34,12 +37,15 @@ pub enum RuntimeError {
     Queue(#[from] crate::delivery::queue::QueueError),
     #[error(transparent)]
     DingTalk(#[from] crate::delivery::dingtalk::DingTalkError),
+    #[error(transparent)]
+    Identity(#[from] identity::IdentityError),
     #[error("signal registration failed: {0}")]
     Signal(#[from] std::io::Error),
 }
 
 pub struct RuntimeOptions {
     pub config_path: PathBuf,
+    pub loaded_config: LoadedConfig,
     pub dry_run: bool,
 }
 
@@ -49,26 +55,18 @@ struct RuntimeHealth {
     state_save_failed: bool,
 }
 
-#[derive(Clone)]
-struct RuntimeIdentity {
-    host: String,
-    ip: Option<String>,
-}
-
 pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
-    let mut config = config::load_config(&options.config_path)?;
-    let initial_host = resolve_host(&config);
+    let LoadedConfig {
+        mut config,
+        source_sha256,
+    } = options.loaded_config;
+    let initial_identity = identity::load_runtime_identity(&config, source_sha256)?;
     let mut persistent = state::load(&config.runtime.state_dir)?;
+    initialize_monitoring_state(config.runtime.enabled, &mut persistent);
     retain_active_check_state(&mut persistent, &config.checks);
     let queue = DeliveryQueue::open(&config.runtime.state_dir, config.delivery.queue_capacity)?;
-    let initial_context = report::ReportContext {
-        host: &initial_host,
-        ip: config.runtime.ip.as_deref(),
-    };
-    let identity = Arc::new(RwLock::new(RuntimeIdentity {
-        host: initial_host.clone(),
-        ip: config.runtime.ip.clone(),
-    }));
+    let initial_context = report_context(&initial_identity);
+    let identity = Arc::new(RwLock::new(initial_identity.clone()));
     if persistent.clean_shutdown == Some(false) {
         enqueue_internal(
             &queue,
@@ -108,10 +106,18 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
         command_timeout: config::parse_duration(&config.runtime.command_timeout)?,
         ..Default::default()
     };
-    let mut observations = Vec::new();
     let mut health = RuntimeHealth::default();
-    info!(host = initial_host, "alertd started");
-    notify_systemd("READY=1");
+    info!(
+        host = initial_identity.host,
+        system_hostname = initial_identity.system_hostname,
+        machine_sha256 = initial_identity.machine_sha256,
+        boot_sha256 = initial_identity.boot_sha256,
+        pid = initial_identity.pid,
+        config_sha256 = initial_identity.config_sha256,
+        monitoring_enabled = config.runtime.enabled,
+        "alertd started"
+    );
+    notify_monitoring_status(config.runtime.enabled, true);
     while !stop.load(Ordering::Relaxed) {
         if reload.swap(false, Ordering::Relaxed) {
             reload_config(
@@ -120,38 +126,26 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
                 &mut persistent,
                 &mut context,
                 &queue,
+                &identity,
                 options.dry_run,
             );
         }
-        let host = resolve_host(&config);
-        if let Ok(mut current) = identity.write() {
-            current.host.clone_from(&host);
-            current.ip.clone_from(&config.runtime.ip);
-        }
-        let report_context = report::ReportContext {
-            host: &host,
-            ip: config.runtime.ip.as_deref(),
-        };
-        observations.clear();
-        run_checks(
+        let current_identity = read_identity(&identity);
+        let report_context = report_context(&current_identity);
+        retry_monitoring_notice(
+            &config,
+            report_context,
+            &mut persistent,
+            &queue,
+            options.dry_run,
+        );
+        run_monitoring_cycle(
             &config,
             report_context,
             &mut persistent,
             &mut context,
             &queue,
             options.dry_run,
-            &mut observations,
-        );
-        persistent
-            .journal_cursors
-            .clone_from(&context.journal_cursors);
-        maybe_daily(
-            &config,
-            report_context,
-            &mut persistent,
-            &queue,
-            options.dry_run,
-            &observations,
         );
         maybe_statistics_reports(
             &config,
@@ -176,7 +170,7 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
             options.dry_run,
             &mut health,
         );
-        notify_systemd("WATCHDOG=1");
+        notify_monitoring_status(config.runtime.enabled, false);
         sleep_interruptibly(
             config::parse_duration(&config.runtime.interval)?,
             &stop,
@@ -195,19 +189,134 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-pub fn send_test(config: &Config, dry_run: bool) -> Result<(), RuntimeError> {
-    let host = resolve_host(config);
-    let mut text = format!("🟢 **OK · alertd 测试**\n\n**主机：** {host}");
-    if let Some(ip) = &config.runtime.ip {
-        text.push_str(&format!("\n\n**IP：** {ip}"));
-    }
-    text.push_str("\n\n**状态：** 配置与钉钉投递正常");
+pub fn send_test(
+    config: &Config,
+    config_sha256: String,
+    dry_run: bool,
+) -> Result<(), RuntimeError> {
+    let identity = identity::load_runtime_identity(config, config_sha256)?;
+    let text = report::format_test(report_context(&identity));
     if dry_run {
         println!("{text}");
     } else {
         build_client(config)?.send(&text, false)?;
     }
     Ok(())
+}
+
+fn initialize_monitoring_state(enabled: bool, persistent: &mut PersistentState) {
+    match persistent.monitoring_enabled {
+        None if enabled => {
+            persistent.monitoring_enabled = Some(true);
+            persistent.pending_monitoring_notice = None;
+        }
+        Some(previous) if previous == enabled => {}
+        _ => apply_persistent_monitoring_transition(enabled, persistent),
+    }
+    if !enabled {
+        reset_persistent_monitoring_state(persistent);
+    }
+}
+
+fn apply_monitoring_transition(
+    enabled: bool,
+    persistent: &mut PersistentState,
+    context: &mut CollectContext,
+) {
+    // 开关切换是监控时间线的断点；清空 cursor 才能让 journald 从重新开启时继续。
+    apply_persistent_monitoring_transition(enabled, persistent);
+    reset_collect_context(context);
+}
+
+fn apply_persistent_monitoring_transition(enabled: bool, persistent: &mut PersistentState) {
+    reset_persistent_monitoring_state(persistent);
+    persistent.monitoring_enabled = Some(enabled);
+    persistent.pending_monitoring_notice = Some(enabled);
+}
+
+fn reset_persistent_monitoring_state(persistent: &mut PersistentState) {
+    persistent.checks.clear();
+    persistent.journal_cursors.clear();
+    // 日报日期和进程生命周期不属于监控采样状态，切换时必须保留。
+}
+
+fn reset_collect_context(context: &mut CollectContext) {
+    context.shm_progress.clear();
+    context.journal_cursors.clear();
+    context.pending_journal_cursors.clear();
+    context.cpu_times.clear();
+    context.network_samples.clear();
+}
+
+fn retry_monitoring_notice(
+    config: &Config,
+    context: report::ReportContext<'_>,
+    persistent: &mut PersistentState,
+    queue: &DeliveryQueue,
+    dry_run: bool,
+) {
+    let Some(enabled) = persistent.pending_monitoring_notice else {
+        return;
+    };
+    let (severity, title, detail) = if enabled {
+        (
+            Severity::Ok,
+            "alertd 监控已开启",
+            "已清空旧告警状态和采样基线；journald 从当前时间开始读取",
+        )
+    } else {
+        (
+            Severity::Warn,
+            "alertd 监控已关闭",
+            "所有 check、告警判断和日报已停止；daemon 与已有队列投递继续运行",
+        )
+    };
+    if enqueue_internal(
+        queue,
+        severity,
+        report::format_internal(context, severity, title, detail),
+        dry_run,
+    ) {
+        persistent.pending_monitoring_notice = None;
+        persist_monitoring_notice_state(&config.runtime.state_dir, persistent);
+        info!(enabled, "monitoring switch notification queued");
+    }
+}
+
+fn persist_monitoring_notice_state(state_dir: &Path, persistent: &PersistentState) {
+    if let Err(error_value) = state::save(state_dir, persistent) {
+        error!(
+            error = %error_value,
+            "cannot immediately persist monitoring switch notification state"
+        );
+    }
+}
+
+fn run_monitoring_cycle(
+    config: &Config,
+    report_context: report::ReportContext<'_>,
+    persistent: &mut PersistentState,
+    context: &mut CollectContext,
+    queue: &DeliveryQueue,
+    dry_run: bool,
+) -> Vec<Observation> {
+    if !config.runtime.enabled {
+        debug!("monitoring cycle skipped because runtime.enabled=false");
+        return Vec::new();
+    }
+    let observations = run_checks(config, report_context, persistent, context, queue, dry_run);
+    persistent
+        .journal_cursors
+        .clone_from(&context.journal_cursors);
+    maybe_daily(
+        config,
+        report_context,
+        persistent,
+        queue,
+        dry_run,
+        &observations,
+    );
+    observations
 }
 
 fn run_checks(
@@ -217,8 +326,8 @@ fn run_checks(
     context: &mut CollectContext,
     queue: &DeliveryQueue,
     dry_run: bool,
-    observations: &mut Vec<Observation>,
-) {
+) -> Vec<Observation> {
+    let mut observations = Vec::new();
     let global_policy = AlarmPolicy::from_strings(
         &config.alarm.pending_for,
         &config.alarm.recover_for,
@@ -249,6 +358,7 @@ fn run_checks(
                     dry_run,
                 );
                 if accepted {
+                    // 需要通知时，journal cursor 必须晚于消息入队，避免队列拒绝时越过日志。
                     if let Some(cursor) = context.pending_journal_cursors.remove(&check.name) {
                         context.journal_cursors.insert(check.name.clone(), cursor);
                     }
@@ -284,6 +394,7 @@ fn run_checks(
             }
         }
     }
+    observations
 }
 
 fn resolve_collector_alarm(
@@ -470,14 +581,8 @@ fn start_delivery_worker(
         let mut consecutive_failures = 0_u32;
         let mut degraded = false;
         while !stop.load(Ordering::Relaxed) {
-            let current = identity
-                .read()
-                .map(|value| value.clone())
-                .unwrap_or_else(|value| value.into_inner().clone());
-            let context = report::ReportContext {
-                host: &current.host,
-                ip: current.ip.as_deref(),
-            };
+            let current = read_identity(&identity);
+            let context = report_context(&current);
             match drain_once(&queue, &client, context) {
                 DrainOutcome::Failed => {
                     consecutive_failures = consecutive_failures.saturating_add(1);
@@ -696,11 +801,13 @@ fn reload_config(
     persistent: &mut PersistentState,
     context: &mut CollectContext,
     queue: &DeliveryQueue,
+    identity: &Arc<RwLock<RuntimeIdentity>>,
     dry_run: bool,
 ) {
-    match config::load_config(path) {
-        Ok(next) if startup_config_equal(config, &next) => {
-            let active_checks = active_check_names(&next.checks);
+    match config::load_config_with_sha256(path) {
+        Ok(next) if startup_config_equal(config, &next.config) => {
+            let monitoring_changed = config.runtime.enabled != next.config.runtime.enabled;
+            let active_checks = active_check_names(&next.config.checks);
             match queue.discard_inactive_checks(&active_checks) {
                 Ok(discarded) if discarded != 0 => {
                     info!(discarded, "discarded queued alerts for inactive checks");
@@ -708,23 +815,33 @@ fn reload_config(
                 Ok(_) => {}
                 Err(error) => {
                     error!(%error, "configuration reload rejected; queued alerts could not be reconciled");
-                    reject_reload(config, queue, dry_run, &error.to_string());
+                    reject_reload(identity, queue, dry_run, &error.to_string());
                     return;
                 }
             }
-            retain_active_check_state(persistent, &next.checks);
+            retain_active_check_state(persistent, &next.config.checks);
             context
                 .journal_cursors
                 .retain(|name, _| active_checks.contains(name));
             context
                 .pending_journal_cursors
                 .retain(|name, _| active_checks.contains(name));
-            *config = next;
-            info!("configuration reloaded");
+            *config = next.config;
+            if monitoring_changed {
+                apply_monitoring_transition(config.runtime.enabled, persistent, context);
+                persist_monitoring_notice_state(&config.runtime.state_dir, persistent);
+                info!(
+                    enabled = config.runtime.enabled,
+                    "monitoring switch applied from reloaded configuration"
+                );
+                notify_monitoring_status(config.runtime.enabled, false);
+            }
+            update_identity(identity, config, next.source_sha256.clone());
+            info!(config_sha256 = next.source_sha256, "configuration reloaded");
         }
         Ok(_) => {
             reject_reload(
-                config,
+                identity,
                 queue,
                 dry_run,
                 "启动级字段发生变化：state_dir、log_level、command_timeout 或 delivery",
@@ -732,7 +849,7 @@ fn reload_config(
         }
         Err(error) => {
             error!(%error, "configuration reload rejected; old configuration remains active");
-            reject_reload(config, queue, dry_run, &error.to_string());
+            reject_reload(identity, queue, dry_run, &error.to_string());
         }
     }
 }
@@ -765,16 +882,18 @@ fn startup_config_equal(current: &Config, next: &Config) -> bool {
         && current.delivery == next.delivery
 }
 
-fn reject_reload(config: &Config, queue: &DeliveryQueue, dry_run: bool, detail: &str) {
-    let host = resolve_host(config);
+fn reject_reload(
+    identity: &Arc<RwLock<RuntimeIdentity>>,
+    queue: &DeliveryQueue,
+    dry_run: bool,
+    detail: &str,
+) {
+    let current = read_identity(identity);
     enqueue_internal(
         queue,
         Severity::Warn,
         report::format_internal(
-            report::ReportContext {
-                host: &host,
-                ip: config.runtime.ip.as_deref(),
-            },
+            report_context(&current),
             Severity::Warn,
             "配置热加载被拒绝",
             detail,
@@ -783,17 +902,36 @@ fn reject_reload(config: &Config, queue: &DeliveryQueue, dry_run: bool, detail: 
     );
 }
 
-fn resolve_host(config: &Config) -> String {
-    config.runtime.host.clone().unwrap_or_else(|| {
-        hostname::get()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned()
-    })
+fn update_identity(shared: &Arc<RwLock<RuntimeIdentity>>, config: &Config, config_sha256: String) {
+    let mut current = shared.write().unwrap_or_else(|value| value.into_inner());
+    identity::update_config_identity(&mut current, config, config_sha256);
+}
+
+fn read_identity(shared: &Arc<RwLock<RuntimeIdentity>>) -> RuntimeIdentity {
+    shared
+        .read()
+        .map(|value| value.clone())
+        .unwrap_or_else(|value| value.into_inner().clone())
+}
+
+fn report_context(identity: &RuntimeIdentity) -> report::ReportContext<'_> {
+    report::ReportContext {
+        host: &identity.host,
+        ip: identity.ip.as_deref(),
+        system_hostname: &identity.system_hostname,
+        machine_sha256: &identity.machine_sha256,
+        boot_sha256: &identity.boot_sha256,
+        pid: identity.pid,
+        config_sha256: &identity.config_sha256,
+    }
 }
 
 fn build_client(config: &Config) -> Result<DingTalkClient, RuntimeError> {
     let (token, secret) = config::resolve_dingtalk_credentials(&config.delivery)?;
+    info!(
+        signing_enabled = secret.is_some(),
+        "DingTalk delivery credentials resolved"
+    );
     Ok(DingTalkClient::new(
         token,
         secret,
@@ -872,6 +1010,20 @@ fn notify_systemd(message: &str) {
     }
 }
 
+fn notify_monitoring_status(enabled: bool, ready: bool) {
+    let status = if enabled {
+        "Monitoring enabled"
+    } else {
+        "Monitoring disabled"
+    };
+    let message = if ready {
+        format!("READY=1\nSTATUS={status}")
+    } else {
+        format!("WATCHDOG=1\nSTATUS={status}")
+    };
+    notify_systemd(&message);
+}
+
 fn sleep_interruptibly(duration: Duration, stop: &AtomicBool, reload: &AtomicBool) {
     let deadline = std::time::Instant::now() + duration;
     let mut next_watchdog = std::time::Instant::now() + Duration::from_secs(30);
@@ -906,10 +1058,23 @@ critical_available_pct = 10
         .unwrap()
     }
 
+    fn test_report_context() -> report::ReportContext<'static> {
+        report::ReportContext {
+            host: "test-host",
+            ip: Some("192.0.2.1"),
+            system_hostname: "system-host",
+            machine_sha256: "machine",
+            boot_sha256: "boot",
+            pid: 7,
+            config_sha256: "config",
+        }
+    }
+
     #[test]
     fn hot_reload_rejects_startup_fields_only() {
         let current = config();
         let mut mutable = current.clone();
+        mutable.runtime.enabled = false;
         mutable.runtime.interval = "10s".into();
         mutable.alarm.recover_for = "10s".into();
         assert!(startup_config_equal(&current, &mutable));
@@ -947,78 +1112,375 @@ critical_available_pct = 10
         assert!(persistent.journal_cursors.is_empty());
     }
 
-    fn counters(
-        snapshot_id: u64,
-        open: u64,
-        close: u64,
-        fills: u64,
-        fail: u64,
-    ) -> std::collections::BTreeMap<String, crate::model::StatisticsCounters> {
-        std::collections::BTreeMap::from([(
-            "live_mm2".into(),
-            crate::model::StatisticsCounters {
-                observed_at: Utc::now(),
-                snapshot_id,
-                open_total: open,
-                close_total: close,
-                fills_total: fills,
-                place_fail_total: fail,
-            },
-        )])
-    }
-
     #[test]
-    fn statistics_report_establishes_first_baseline() {
-        let body = "live_mm2\n\n近30s：open 1｜close 2｜fills 3｜fail 0";
-        let (rendered, next) = statistics_report_body(
-            body,
-            Duration::from_secs(600),
-            &counters(10, 100, 90, 80, 2),
-            &Default::default(),
+    fn hot_reload_updates_identity_only_after_success() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("alertd.toml");
+        let initial_text = r#"
+[runtime]
+host = "old-role"
+state_dir = "/tmp/alertd"
+[[checks]]
+name = "memory"
+type = "memory"
+warn_available_pct = 20
+critical_available_pct = 10
+"#;
+        std::fs::write(&config_path, initial_text).unwrap();
+        let mut current = config::load_config(&config_path).unwrap();
+        let identity = Arc::new(RwLock::new(RuntimeIdentity {
+            host: "old-role".into(),
+            ip: None,
+            system_hostname: "system-host".into(),
+            machine_sha256: "machine".into(),
+            boot_sha256: "boot".into(),
+            pid: 7,
+            config_sha256: "old-hash".into(),
+        }));
+        let queue = DeliveryQueue::open(temporary.path(), 16).unwrap();
+        let mut persistent = PersistentState::default();
+        let mut context = CollectContext::default();
+        let next_text = initial_text.replace("old-role", "new-role");
+        std::fs::write(&config_path, &next_text).unwrap();
+
+        reload_config(
+            &config_path,
+            &mut current,
+            &mut persistent,
+            &mut context,
+            &queue,
+            &identity,
+            true,
         );
-        assert!(rendered.contains("近10min：基线建立中"));
-        assert_eq!(next["live_mm2"].open_total, 100);
+        let accepted = read_identity(&identity);
+        assert_eq!(accepted.host, "new-role");
+        assert_ne!(accepted.config_sha256, "old-hash");
+
+        std::fs::write(&config_path, "invalid = [").unwrap();
+        reload_config(
+            &config_path,
+            &mut current,
+            &mut persistent,
+            &mut context,
+            &queue,
+            &identity,
+            true,
+        );
+        let rejected = read_identity(&identity);
+        assert_eq!(rejected.host, accepted.host);
+        assert_eq!(rejected.config_sha256, accepted.config_sha256);
     }
 
     #[test]
-    fn statistics_report_uses_difference_from_previous_report() {
-        let previous = crate::model::StatisticsBaseline {
-            observed_at: Utc::now(),
-            snapshot_id: 10,
-            open_total: 100,
-            close_total: 90,
-            fills_total: 80,
-            place_fail_total: 2,
+    fn hot_reload_applies_monitoring_switch_and_preserves_queued_alerts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("alertd.toml");
+        let initial_text = format!(
+            r#"
+[runtime]
+enabled = true
+state_dir = "{}"
+[[checks]]
+name = "memory"
+type = "memory"
+warn_available_pct = 20
+critical_available_pct = 10
+"#,
+            temporary.path().display()
+        );
+        std::fs::write(&config_path, &initial_text).unwrap();
+        let mut current = config::load_config(&config_path).unwrap();
+        let identity = Arc::new(RwLock::new(RuntimeIdentity {
+            host: "role".into(),
+            ip: None,
+            system_hostname: "system-host".into(),
+            machine_sha256: "machine".into(),
+            boot_sha256: "boot".into(),
+            pid: 7,
+            config_sha256: "old-hash".into(),
+        }));
+        let queue = DeliveryQueue::open(temporary.path(), 16).unwrap();
+        queue
+            .enqueue_check("memory", Severity::Critical, "already queued".into())
+            .unwrap();
+        let mut persistent = PersistentState {
+            monitoring_enabled: Some(true),
+            ..Default::default()
         };
-        let body = "**live_mm2**\n\n近30s：open 1｜close 2｜fills 3｜fail 0";
-        let (rendered, _) = statistics_report_body(
-            body,
-            Duration::from_secs(600),
-            &counters(30, 107, 95, 89, 3),
-            &std::collections::BTreeMap::from([("live_mm2".into(), previous)]),
+        persistent
+            .checks
+            .insert("memory".into(), CheckState::default());
+        persistent
+            .journal_cursors
+            .insert("journal".into(), "old".into());
+        let mut context = CollectContext::default();
+        context
+            .journal_cursors
+            .insert("journal".into(), "old".into());
+        context.cpu_times.insert(
+            "cpu".into(),
+            collectors::cpu::parse_cpu_times("cpu0 1 2 3 4 5 6 7 8").unwrap(),
         );
-        assert!(rendered.contains("近10min：open 7｜close 5｜fills 9｜fail 1"));
-        assert!(!rendered.contains("近30s"));
+        std::fs::write(
+            &config_path,
+            initial_text.replace("enabled = true", "enabled = false"),
+        )
+        .unwrap();
+
+        reload_config(
+            &config_path,
+            &mut current,
+            &mut persistent,
+            &mut context,
+            &queue,
+            &identity,
+            false,
+        );
+
+        assert!(!current.runtime.enabled);
+        assert!(persistent.checks.is_empty());
+        assert!(persistent.journal_cursors.is_empty());
+        assert!(context.journal_cursors.is_empty());
+        assert!(context.cpu_times.is_empty());
+        assert_eq!(persistent.monitoring_enabled, Some(false));
+        assert_eq!(persistent.pending_monitoring_notice, Some(false));
+        assert_eq!(queue.pending_count().unwrap(), 1);
+        let saved = state::load(temporary.path()).unwrap();
+        assert_eq!(saved.monitoring_enabled, Some(false));
+        assert_eq!(saved.pending_monitoring_notice, Some(false));
+
+        std::fs::write(
+            &config_path,
+            initial_text.replace("enabled = true", "enabled = \"false\""),
+        )
+        .unwrap();
+        reload_config(
+            &config_path,
+            &mut current,
+            &mut persistent,
+            &mut context,
+            &queue,
+            &identity,
+            true,
+        );
+        assert!(!current.runtime.enabled);
+        assert_eq!(persistent.monitoring_enabled, Some(false));
     }
 
     #[test]
-    fn statistics_report_rebuilds_baseline_after_process_restart() {
-        let previous = crate::model::StatisticsBaseline {
-            observed_at: Utc::now(),
-            snapshot_id: 30,
-            open_total: 100,
-            close_total: 90,
-            fills_total: 80,
-            place_fail_total: 2,
-        };
-        let body = "live_mm2\n\n近30s：open 1｜close 2｜fills 3｜fail 0";
-        let (rendered, next) = statistics_report_body(
-            body,
-            Duration::from_secs(600),
-            &counters(2, 1, 1, 1, 0),
-            &std::collections::BTreeMap::from([("live_mm2".into(), previous)]),
+    fn disabled_initialization_clears_monitoring_state_and_requests_notice() {
+        let mut persistent = PersistentState::default();
+        persistent
+            .checks
+            .insert("memory".into(), CheckState::default());
+        persistent
+            .journal_cursors
+            .insert("journal".into(), "old-cursor".into());
+        persistent.last_daily_date = Some("2026-08-27".into());
+
+        initialize_monitoring_state(false, &mut persistent);
+
+        assert!(persistent.checks.is_empty());
+        assert!(persistent.journal_cursors.is_empty());
+        assert_eq!(persistent.last_daily_date.as_deref(), Some("2026-08-27"));
+        assert_eq!(persistent.monitoring_enabled, Some(false));
+        assert_eq!(persistent.pending_monitoring_notice, Some(false));
+    }
+
+    #[test]
+    fn first_enabled_start_preserves_existing_monitoring_state() {
+        let mut persistent = PersistentState::default();
+        persistent
+            .checks
+            .insert("memory".into(), CheckState::default());
+
+        initialize_monitoring_state(true, &mut persistent);
+
+        assert!(persistent.checks.contains_key("memory"));
+        assert_eq!(persistent.monitoring_enabled, Some(true));
+        assert_eq!(persistent.pending_monitoring_notice, None);
+    }
+
+    #[test]
+    fn monitoring_transition_resets_alarm_cursors_and_sampling_baselines() {
+        let mut persistent = PersistentState::default();
+        persistent
+            .checks
+            .insert("memory".into(), CheckState::default());
+        persistent
+            .journal_cursors
+            .insert("journal".into(), "old-cursor".into());
+        persistent.last_daily_date = Some("2026-08-27".into());
+        let mut context = CollectContext::default();
+        context
+            .journal_cursors
+            .insert("journal".into(), "old-cursor".into());
+        context
+            .pending_journal_cursors
+            .insert("journal".into(), "pending-cursor".into());
+        context.cpu_times.insert(
+            "cpu".into(),
+            collectors::cpu::parse_cpu_times("cpu0 1 2 3 4 5 6 7 8").unwrap(),
         );
-        assert!(rendered.contains("近10min：基线建立中"));
-        assert_eq!(next["live_mm2"].snapshot_id, 2);
+
+        apply_monitoring_transition(false, &mut persistent, &mut context);
+
+        assert!(persistent.checks.is_empty());
+        assert!(persistent.journal_cursors.is_empty());
+        assert_eq!(persistent.last_daily_date.as_deref(), Some("2026-08-27"));
+        assert!(context.journal_cursors.is_empty());
+        assert!(context.pending_journal_cursors.is_empty());
+        assert!(context.cpu_times.is_empty());
+        assert_eq!(persistent.monitoring_enabled, Some(false));
+        assert_eq!(persistent.pending_monitoring_notice, Some(false));
+    }
+
+    #[test]
+    fn monitoring_notice_is_deduplicated_after_queue_acceptance() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.runtime.state_dir = temporary.path().into();
+        let queue = DeliveryQueue::open(temporary.path(), 16).unwrap();
+        let mut persistent = PersistentState {
+            monitoring_enabled: Some(false),
+            pending_monitoring_notice: Some(false),
+            ..Default::default()
+        };
+
+        retry_monitoring_notice(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &queue,
+            false,
+        );
+        assert_eq!(persistent.pending_monitoring_notice, None);
+        assert_eq!(queue.pending_count().unwrap(), 1);
+        let (_, message) = queue.oldest().unwrap().unwrap();
+        assert_eq!(message.severity, Severity::Warn);
+        assert!(message.text.contains("alertd 监控已关闭"));
+
+        let mut persistent = state::load(temporary.path()).unwrap();
+        initialize_monitoring_state(false, &mut persistent);
+        retry_monitoring_notice(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &queue,
+            false,
+        );
+        assert_eq!(queue.pending_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn reenable_transition_starts_with_fresh_state_and_ok_notice() {
+        let mut persistent = PersistentState {
+            monitoring_enabled: Some(false),
+            ..Default::default()
+        };
+        persistent
+            .checks
+            .insert("old-alert".into(), CheckState::default());
+        persistent
+            .journal_cursors
+            .insert("journal".into(), "disabled-period".into());
+        let mut context = CollectContext::default();
+        context
+            .journal_cursors
+            .insert("journal".into(), "disabled-period".into());
+
+        apply_monitoring_transition(true, &mut persistent, &mut context);
+
+        assert!(persistent.checks.is_empty());
+        assert!(persistent.journal_cursors.is_empty());
+        assert!(context.journal_cursors.is_empty());
+        assert_eq!(persistent.monitoring_enabled, Some(true));
+        assert_eq!(persistent.pending_monitoring_notice, Some(true));
+    }
+
+    #[test]
+    fn monitoring_notice_retries_after_queue_rejection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.runtime.state_dir = temporary.path().into();
+        let queue = DeliveryQueue::open(temporary.path(), 1).unwrap();
+        queue
+            .enqueue_internal(Severity::Warn, "occupied".into())
+            .unwrap();
+        let mut persistent = PersistentState {
+            monitoring_enabled: Some(true),
+            pending_monitoring_notice: Some(true),
+            ..Default::default()
+        };
+
+        retry_monitoring_notice(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &queue,
+            false,
+        );
+        assert_eq!(persistent.pending_monitoring_notice, Some(true));
+        let (path, _) = queue.oldest().unwrap().unwrap();
+        queue.acknowledge(&path).unwrap();
+
+        retry_monitoring_notice(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &queue,
+            false,
+        );
+        assert_eq!(persistent.pending_monitoring_notice, None);
+        let (_, message) = queue.oldest().unwrap().unwrap();
+        assert_eq!(message.severity, Severity::Ok);
+        assert!(message.text.contains("alertd 监控已开启"));
+    }
+
+    #[test]
+    fn disabled_cycle_does_not_collect_advance_state_or_send_daily_report() {
+        let mut config = config();
+        config.runtime.enabled = false;
+        let queue_root = tempfile::tempdir().unwrap();
+        let queue = DeliveryQueue::open(queue_root.path(), 16).unwrap();
+        let mut persistent = PersistentState::default();
+        persistent
+            .checks
+            .insert("memory".into(), CheckState::default());
+        persistent
+            .journal_cursors
+            .insert("journal".into(), "saved".into());
+        let before = serde_json::to_value(&persistent).unwrap();
+        let mut context = CollectContext::default();
+        context
+            .journal_cursors
+            .insert("journal".into(), "live".into());
+        context
+            .pending_journal_cursors
+            .insert("journal".into(), "pending".into());
+
+        let observations = run_monitoring_cycle(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &mut context,
+            &queue,
+            false,
+        );
+
+        assert_eq!(serde_json::to_value(&persistent).unwrap(), before);
+        assert_eq!(queue.pending_count().unwrap(), 0);
+        assert!(observations.is_empty());
+        assert_eq!(
+            context.journal_cursors.get("journal").map(String::as_str),
+            Some("live")
+        );
+        assert_eq!(
+            context
+                .pending_journal_cursors
+                .get("journal")
+                .map(String::as_str),
+            Some("pending")
+        );
     }
 }

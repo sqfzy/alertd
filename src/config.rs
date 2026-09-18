@@ -1,5 +1,8 @@
+//! 严格 TOML 配置 POD、范围校验和钉钉环境密钥解析。
+
 use crate::model::Severity;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs,
@@ -93,6 +96,7 @@ fn default_critical_inode_used_pct() -> f64 {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+/// alertd 的完整运行配置；未知字段在反序列化阶段即被拒绝。
 pub struct Config {
     #[serde(default)]
     pub runtime: RuntimeConfig,
@@ -107,6 +111,8 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub host: Option<String>,
     pub ip: Option<String>,
     #[serde(default = "default_interval")]
@@ -121,6 +127,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             host: None,
             ip: None,
             interval: default_interval(),
@@ -202,6 +209,7 @@ impl Default for DeliveryConfig {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+/// 每类 check 的严格、互斥配置载荷。
 pub enum CheckKind {
     Process {
         cmdline_contains: String,
@@ -244,6 +252,16 @@ pub enum CheckKind {
         stale_after: String,
         #[serde(default = "default_minimum_size_bytes")]
         minimum_size_bytes: u64,
+    },
+    MetricsFile {
+        path: PathBuf,
+        stale_after: String,
+        metrics: Vec<MetricRule>,
+    },
+    MetricsShm {
+        path: String,
+        abi_hash: Option<ShmAbiHash>,
+        metrics: Vec<ShmMetricRule>,
     },
     Disk {
         mount: PathBuf,
@@ -305,9 +323,10 @@ pub enum ShmProbe {
     GconfV2,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Endian {
+    #[default]
     Little,
     Big,
 }
@@ -317,6 +336,63 @@ pub enum Endian {
 pub struct JournalRule {
     pub contains: String,
     pub severity: Severity,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MetricRule {
+    pub key: String,
+    pub critical_below: Option<f64>,
+    pub warn_below: Option<f64>,
+    pub warn_above: Option<f64>,
+    pub critical_above: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ShmAbiHash {
+    pub offset: u64,
+    pub expected_hex: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ShmMetricRule {
+    pub key: String,
+    pub offset: u64,
+    pub value_type: ShmValueType,
+    #[serde(default)]
+    pub endian: Endian,
+    pub critical_below: Option<f64>,
+    pub warn_below: Option<f64>,
+    pub warn_above: Option<f64>,
+    pub critical_above: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ShmValueType {
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+}
+
+impl ShmValueType {
+    pub const fn width(self) -> u64 {
+        match self {
+            Self::U8 | Self::I8 => 1,
+            Self::U16 | Self::I16 => 2,
+            Self::U32 | Self::I32 | Self::F32 => 4,
+            Self::U64 | Self::I64 | Self::F64 => 8,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -332,14 +408,27 @@ pub enum ConfigError {
     Invalid(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct LoadedConfig {
+    pub config: Config,
+    pub source_sha256: String,
+}
+
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
+    Ok(load_config_with_sha256(path)?.config)
+}
+
+pub fn load_config_with_sha256(path: &Path) -> Result<LoadedConfig, ConfigError> {
     let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
         path: path.into(),
         source,
     })?;
     let config: Config = toml::from_str(&text)?;
     validate_config(&config)?;
-    Ok(config)
+    Ok(LoadedConfig {
+        config,
+        source_sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+    })
 }
 
 pub fn parse_duration(value: &str) -> Result<Duration, ConfigError> {
@@ -706,6 +795,25 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
             )?;
             Ok(())
         }
+        CheckKind::MetricsFile {
+            path,
+            stale_after,
+            metrics,
+        } => {
+            validate_metric_rules(check, path.is_absolute(), metrics)?;
+            duration_range(
+                "checks.metrics_file.stale_after",
+                stale_after,
+                interval,
+                Duration::from_secs(86_400),
+            )?;
+            Ok(())
+        }
+        CheckKind::MetricsShm {
+            path,
+            abi_hash,
+            metrics,
+        } => validate_metrics_shm(check, path, abi_hash.as_ref(), metrics),
         CheckKind::Disk {
             mount,
             warn_used_pct,
@@ -796,29 +904,196 @@ fn valid_rate_thresholds(warn: f64, critical: f64) -> bool {
     warn.is_finite() && critical.is_finite() && warn >= 0.0 && warn < critical
 }
 
+fn validate_metric_rules(
+    check: &CheckConfig,
+    valid_path: bool,
+    metrics: &[MetricRule],
+) -> Result<(), ConfigError> {
+    let unique: HashSet<_> = metrics.iter().map(|metric| &metric.key).collect();
+    if !valid_path
+        || metrics.is_empty()
+        || metrics.len() > 64
+        || unique.len() != metrics.len()
+        || metrics.iter().any(|metric| {
+            invalid_metric_fields(
+                &metric.key,
+                metric.critical_below,
+                metric.warn_below,
+                metric.warn_above,
+                metric.critical_above,
+            )
+        })
+    {
+        return Err(ConfigError::Invalid(format!(
+            "check {} has invalid metrics path, keys, or thresholds",
+            check.name
+        )));
+    }
+    Ok(())
+}
+
+fn validate_metrics_shm(
+    check: &CheckConfig,
+    path: &str,
+    abi_hash: Option<&ShmAbiHash>,
+    metrics: &[ShmMetricRule],
+) -> Result<(), ConfigError> {
+    let unique: HashSet<_> = metrics.iter().map(|metric| &metric.key).collect();
+    let invalid_abi = abi_hash.is_some_and(|abi| {
+        abi.expected_hex.len() < 2
+            || abi.expected_hex.len() > 128
+            || abi.expected_hex.len() % 2 != 0
+            || !abi
+                .expected_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || abi
+                .offset
+                .checked_add((abi.expected_hex.len() / 2) as u64)
+                .is_none()
+    });
+    let invalid_metric = metrics.iter().any(|metric| {
+        invalid_metric_fields(
+            &metric.key,
+            metric.critical_below,
+            metric.warn_below,
+            metric.warn_above,
+            metric.critical_above,
+        ) || metric
+            .offset
+            .checked_add(metric.value_type.width())
+            .is_none()
+    });
+    if !valid_posix_shm_name(path)
+        || metrics.is_empty()
+        || metrics.len() > 64
+        || unique.len() != metrics.len()
+        || invalid_abi
+        || invalid_metric
+    {
+        return Err(ConfigError::Invalid(format!(
+            "check {} has invalid metrics_shm path, ABI hash, metrics, or thresholds",
+            check.name
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_metric_fields(
+    key: &str,
+    critical_below: Option<f64>,
+    warn_below: Option<f64>,
+    warn_above: Option<f64>,
+    critical_above: Option<f64>,
+) -> bool {
+    key.is_empty()
+        || key.len() > 128
+        || [critical_below, warn_below, warn_above, critical_above]
+            .into_iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        || matches!(
+            (critical_below, warn_below),
+            (Some(critical), Some(warn)) if critical >= warn
+        )
+        || matches!(
+            (warn_above, critical_above),
+            (Some(warn), Some(critical)) if warn >= critical
+        )
+        || lower_and_upper_overlap(critical_below, warn_below, warn_above, critical_above)
+}
+
+fn lower_and_upper_overlap(
+    critical_below: Option<f64>,
+    warn_below: Option<f64>,
+    warn_above: Option<f64>,
+    critical_above: Option<f64>,
+) -> bool {
+    [critical_below, warn_below]
+        .into_iter()
+        .flatten()
+        .any(|lower| {
+            [warn_above, critical_above]
+                .into_iter()
+                .flatten()
+                .any(|upper| lower >= upper)
+        })
+}
+
+fn valid_posix_shm_name(path: &str) -> bool {
+    path.len() > 1
+        && path.len() <= 255
+        && path.starts_with('/')
+        && !path[1..].contains('/')
+        && !path.contains('\0')
+}
+
 pub fn resolve_dingtalk_credentials(
     config: &DeliveryConfig,
 ) -> Result<(String, Option<String>), ConfigError> {
-    let token = std::env::var(&config.token_env).map_err(|_| {
-        ConfigError::Invalid(format!("environment {} is missing", config.token_env))
-    })?;
-    if token.is_empty() {
-        return Err(ConfigError::Invalid(
-            "DingTalk token cannot be empty".into(),
-        ));
-    }
-    let secret = if config.signed {
-        let value = std::env::var(&config.secret_env).map_err(|_| {
-            ConfigError::Invalid(format!("environment {} is missing", config.secret_env))
-        })?;
-        if value.is_empty() {
-            return Err(ConfigError::Invalid(
-                "DingTalk signing secret cannot be empty".into(),
-            ));
-        }
-        Some(value)
-    } else {
-        None
-    };
+    let token = required_environment_value(&config.token_env, std::env::var(&config.token_env))?;
+    let secret = optional_environment_value(&config.secret_env, std::env::var(&config.secret_env))?;
     Ok((token, secret))
+}
+
+fn required_environment_value(
+    name: &str,
+    value: Result<String, std::env::VarError>,
+) -> Result<String, ConfigError> {
+    match value {
+        Ok(value) if !value.is_empty() => Ok(value),
+        Ok(_) => Err(ConfigError::Invalid(format!(
+            "environment {name} cannot be empty"
+        ))),
+        Err(std::env::VarError::NotPresent) => Err(ConfigError::Invalid(format!(
+            "environment {name} is missing"
+        ))),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::Invalid(format!(
+            "environment {name} is not valid Unicode"
+        ))),
+    }
+}
+
+fn optional_environment_value(
+    name: &str,
+    value: Result<String, std::env::VarError>,
+) -> Result<Option<String>, ConfigError> {
+    match value {
+        Ok(value) if !value.is_empty() => Ok(Some(value)),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::Invalid(format!(
+            "environment {name} is not valid Unicode"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn dingtalk_token_is_required_and_non_empty() {
+        assert_eq!(
+            required_environment_value("TOKEN", Ok("token".into())).unwrap(),
+            "token"
+        );
+        assert!(required_environment_value("TOKEN", Ok(String::new())).is_err());
+        assert!(required_environment_value("TOKEN", Err(std::env::VarError::NotPresent)).is_err());
+    }
+
+    #[test]
+    fn dingtalk_secret_is_optional_for_ip_whitelist_mode() {
+        assert_eq!(
+            optional_environment_value("SECRET", Ok("secret".into())).unwrap(),
+            Some("secret".into())
+        );
+        assert_eq!(
+            optional_environment_value("SECRET", Ok(String::new())).unwrap(),
+            None
+        );
+        assert_eq!(
+            optional_environment_value("SECRET", Err(std::env::VarError::NotPresent)).unwrap(),
+            None
+        );
+    }
 }

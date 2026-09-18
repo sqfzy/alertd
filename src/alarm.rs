@@ -1,3 +1,5 @@
+//! 将 Observation 与 CheckState 归约为告警、重复、恢复或日志事件。
+
 use crate::{
     config::parse_duration,
     model::{AlertEvent, CheckState, Observation, ObservationStatus, Severity, Transition},
@@ -33,6 +35,7 @@ fn elapsed(now: DateTime<Utc>, since: DateTime<Utc>) -> Duration {
     (now - since).to_std().unwrap_or(Duration::ZERO)
 }
 
+/// 原地推进一个 check 的状态，并在本轮需要通知时返回事件。
 pub fn evaluate(
     state: &mut CheckState,
     observation: &Observation,
