@@ -39,9 +39,6 @@ fn default_critical_repeat() -> String {
 fn default_daily() -> Option<String> {
     Some("02:00".into())
 }
-fn default_statistics_report_every() -> String {
-    "off".into()
-}
 fn default_timeout() -> String {
     "3s".into()
 }
@@ -226,13 +223,6 @@ pub enum CheckKind {
         ignore_contains: Vec<String>,
         rules: Vec<JournalRule>,
     },
-    LiveMmEntry {
-        instances: Vec<LiveMmInstance>,
-        stale_after: String,
-        statistics_stale_after: Option<String>,
-        #[serde(default = "default_statistics_report_every")]
-        statistics_report_every: String,
-    },
     ObservationFile {
         path: PathBuf,
         stale_after: String,
@@ -290,13 +280,6 @@ pub enum CheckKind {
         critical_drops_per_second: f64,
     },
     SystemTuning,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LiveMmInstance {
-    pub name: String,
-    pub unit: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -719,61 +702,6 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
                 "check {} needs journal units, non-empty filters, and non-empty warn/critical rules",
                 check.name
             )))
-        }
-        CheckKind::LiveMmEntry {
-            instances,
-            stale_after,
-            statistics_stale_after,
-            statistics_report_every,
-        } => {
-            let mut names = HashSet::new();
-            let mut units = HashSet::new();
-            if instances.is_empty()
-                || instances.len() > 64
-                || instances.iter().any(|instance| {
-                    instance.name.is_empty()
-                        || instance.name.len() > 128
-                        || instance.name.chars().any(char::is_control)
-                        || instance.unit.is_empty()
-                        || instance.unit.len() > 255
-                        || !names.insert(&instance.name)
-                        || !units.insert(&instance.unit)
-                })
-            {
-                return Err(ConfigError::Invalid(format!(
-                    "check {} needs 1..=64 unique live_mm instance names and units",
-                    check.name
-                )));
-            }
-            duration_range(
-                "checks.live_mm_entry.stale_after",
-                stale_after,
-                interval,
-                Duration::from_secs(300),
-            )?;
-            if let Some(value) = statistics_stale_after {
-                duration_range(
-                    "checks.live_mm_entry.statistics_stale_after",
-                    value,
-                    Duration::from_secs(30),
-                    Duration::from_secs(300),
-                )?;
-            }
-            if statistics_report_every != "off" {
-                duration_range(
-                    "checks.live_mm_entry.statistics_report_every",
-                    statistics_report_every,
-                    Duration::from_secs(60),
-                    Duration::from_secs(24 * 3600),
-                )?;
-                if statistics_stale_after.is_none() {
-                    return Err(ConfigError::Invalid(format!(
-                        "check {} needs statistics_stale_after when statistics reports are enabled",
-                        check.name
-                    )));
-                }
-            }
-            Ok(())
         }
         CheckKind::ObservationFile {
             path, stale_after, ..

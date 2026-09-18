@@ -66,15 +66,6 @@ min_count = 1
 runbook = "https://runbook.example/process-down"
 
 [[checks]]
-name = "live-mm-entry"
-type = "live_mm_entry"
-instances = [
-  { name = "live_mm1", unit = "live-mm-v0.service" },
-  { name = "live_mm2", unit = "live-mm-v0@account8.service" },
-]
-stale_after = "30s"
-
-[[checks]]
 name = "live-mm-health"
 type = "observation_file"
 # 外部观察器以临时文件 + fsync + 原子 rename 写入 JSON 快照。

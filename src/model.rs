@@ -136,29 +136,5 @@ pub struct CheckState {
     #[serde(default)]
     pub daily_critical_count: u64,
     #[serde(default)]
-    pub last_statistics_report_bucket: Option<String>,
-    #[serde(default)]
-    pub statistics_report_baselines: BTreeMap<String, StatisticsBaseline>,
-    #[serde(default)]
     pub last_external_report_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct StatisticsBaseline {
-    pub observed_at: DateTime<Utc>,
-    pub snapshot_id: u64,
-    pub open_total: u64,
-    pub close_total: u64,
-    pub fills_total: u64,
-    pub place_fail_total: u64,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct StatisticsCounters {
-    pub observed_at: DateTime<Utc>,
-    pub snapshot_id: u64,
-    pub open_total: u64,
-    pub close_total: u64,
-    pub fills_total: u64,
-    pub place_fail_total: u64,
 }

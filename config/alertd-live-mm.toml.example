@@ -15,27 +15,29 @@ daily_report_at = "off"
 collect_fail_after_n = 3
 
 [delivery]
-signed = false
-token_env = "ALERTD_LIVE_MM_DINGTALK_TOKEN"
-secret_env = "ALERTD_LIVE_MM_DINGTALK_SECRET"
 timeout = "3s"
 queue_capacity = 1024
 queue_warn_pct = 80
 failure_report_after = 3
 retry_initial = "5s"
 retry_max = "5m"
+
+[[delivery.routes]]
+name = "default"
+token_env = "ALERTD_LIVE_MM_DINGTALK_TOKEN"
 at_all_on_critical = false
 
 [[checks]]
-name = "live-mm-entry"
-type = "live_mm_entry"
+name = "live-mm-health"
 severity = "critical"
-stale_after = "20s"
-statistics_stale_after = "90s"
-statistics_report_every = "10m"
-instances = [
-  { name = "live_mm1", unit = "live-mm-v0.service" },
-  { name = "live_mm2", unit = "live-mm-v0@account8.service" },
-  { name = "live_mm3", unit = "live-mm-v0@live_mm3.service" },
-  { name = "live_mm4", unit = "live-mm-v0@live_mm4.service" },
-]
+type = "observation_file"
+path = "/run/live-mm-observer/health.json"
+stale_after = "30s"
+
+[[checks]]
+name = "live-mm-statistics"
+type = "observation_file"
+path = "/run/live-mm-observer/statistics.json"
+stale_after = "90s"
+forward_report = true
+pending_for = "24h"

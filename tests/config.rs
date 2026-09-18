@@ -105,11 +105,11 @@ fn complete_example_matches_strict_schema() {
 
     let config = config::load_config(&path).expect("complete example must remain valid");
 
-    assert_eq!(config.checks.len(), 16);
+    assert_eq!(config.checks.len(), 15);
 }
 
 #[test]
-fn validates_live_mm_entry_contract() {
+fn rejects_removed_live_mm_entry_type() {
     let text = r#"
 [delivery]
 [[delivery.routes]]
@@ -129,15 +129,7 @@ instances = [
   { name = "live_mm2", unit = "live-mm-v0@live_mm2.service" },
 ]
 "#;
-    let config: Config = toml::from_str(text).unwrap();
-    config::validate_config(&config).unwrap();
-
-    let duplicate: Config =
-        toml::from_str(&text.replace("name = \"live_mm2\"", "name = \"live_mm1\"")).unwrap();
-    assert!(config::validate_config(&duplicate).is_err());
-
-    let too_short: Config = toml::from_str(&text.replace("30s", "4s")).unwrap();
-    assert!(config::validate_config(&too_short).is_err());
+    assert!(toml::from_str::<Config>(text).is_err());
 }
 
 #[test]
