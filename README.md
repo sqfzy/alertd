@@ -35,7 +35,7 @@ alertd --config /etc/alertd/alertd.toml --send-test
 - `process`：扫描 `/proc/<pid>/cmdline`，检查匹配进程数量。
 - `shm`：支持 `exists`、`u64_counter` 和 `gconf_v2`；可只检查存在，也可检查进度停滞。`gconf_v2` 必须显式配置 ABI 的 `magic` 与 `layout_version`，BcastRing 按 head、Board 按 header heartbeat 与尾部 slot seqlock 判断进度；未知 SegKind fail-closed。
 - `journal`：按 systemd unit 读取 journald，使用普通、区分大小写的子串规则过滤已知噪声并区分 WARN/CRITICAL；`ignore_contains` 优先于告警规则。
-- `live_mm_entry`：一次读取多个 live_mm unit 的入口位、运行时风险位和已提交策略统计快照；可按北京时间整点时间桶发送汇总。
+- `live_mm_entry`：一次读取多个 live_mm unit 的入口位、四类风险 mask 和已提交策略统计快照；可按北京时间整点时间桶发送汇总。四类风险为全局运行时、币级组合、账户级 order guard 与币级 order guard；任一非零或 `risk_state` 缺失均进入该检查配置的告警级别。
 
 `live_mm_entry` 的统计配置保持向后兼容：`statistics_report_every` 默认 `off`；启用周期报告时必须同时配置 `statistics_stale_after`（30 秒至 5 分钟）。统计行只有在同一 `snapshot_id` 的最终 `event=strategy_stats` 出现后才会被采用，孤立逐币行不会进入报告。
 

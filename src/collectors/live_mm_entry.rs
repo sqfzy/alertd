@@ -22,6 +22,17 @@ struct EntryState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct RiskState {
+    observed_at: DateTime<Utc>,
+    runtime_risk_mask: u32,
+    symbol_risk_combined_mask: u32,
+    symbol_risk_affected: u32,
+    order_guard_account_mask: u32,
+    order_guard_symbol_combined_mask: u32,
+    order_guard_symbol_affected: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct JournalState {
     unit: String,
     message: String,
@@ -81,6 +92,7 @@ fn evaluate(
     statistics_stale_after: Option<Duration>,
 ) -> Observation {
     let latest = latest_by_unit(rows);
+    let latest_risks = latest_risk_by_unit(rows);
     let statistics = latest_statistics_by_unit(rows);
     let units = units
         .iter()
@@ -146,6 +158,43 @@ fn evaluate(
             }
         }
 
+        match latest_risks.get(instance.unit.as_str()) {
+            Some(row) => match parse_risk_state(row) {
+                Ok(state) => {
+                    let age = now
+                        .signed_duration_since(state.observed_at)
+                        .to_std()
+                        .unwrap_or(Duration::ZERO);
+                    details.push(format!(
+                        "{} risks runtime=0x{:08x} symbol=0x{:08x}/affected=0x{:08x} guard_account=0x{:02x} guard_symbol=0x{:02x}/affected=0x{:08x} age={}s",
+                        instance.name,
+                        state.runtime_risk_mask,
+                        state.symbol_risk_combined_mask,
+                        state.symbol_risk_affected,
+                        state.order_guard_account_mask,
+                        state.order_guard_symbol_combined_mask,
+                        state.order_guard_symbol_affected,
+                        age.as_secs(),
+                    ));
+                    if state.runtime_risk_mask != 0
+                        || state.symbol_risk_combined_mask != 0
+                        || state.order_guard_account_mask != 0
+                        || state.order_guard_symbol_combined_mask != 0
+                    {
+                        failures.push(instance.name.clone());
+                    }
+                }
+                Err(error) => {
+                    details.push(format!("{} risk_state {}", instance.name, error));
+                    failures.push(instance.name.clone());
+                }
+            },
+            None => {
+                details.push(format!("{} risk_state missing", instance.name));
+                failures.push(instance.name.clone());
+            }
+        }
+
         if let Some(maximum_age) = statistics_stale_after {
             match statistics.get(instance.unit.as_str()) {
                 Some(snapshot) => {
@@ -171,6 +220,8 @@ fn evaluate(
         }
     }
 
+    failures.sort();
+    failures.dedup();
     let summary = if failures.is_empty() {
         format!("{} 个 live_mm 交易入口与风险位正常", instances.len())
     } else {
@@ -568,6 +619,22 @@ fn latest_by_unit(rows: &[JournalState]) -> HashMap<&str, &JournalState> {
     latest
 }
 
+fn latest_risk_by_unit(rows: &[JournalState]) -> HashMap<&str, &JournalState> {
+    let mut latest: HashMap<&str, &JournalState> = HashMap::new();
+    for row in rows {
+        if !row.message.contains("event=risk_state ") {
+            continue;
+        }
+        match latest.get(row.unit.as_str()) {
+            Some(previous) if previous.observed_at >= row.observed_at => {}
+            _ => {
+                latest.insert(row.unit.as_str(), row);
+            }
+        }
+    }
+    latest
+}
+
 fn parse_state(row: &JournalState) -> Result<EntryState, String> {
     Ok(EntryState {
         observed_at: row.observed_at,
@@ -576,6 +643,21 @@ fn parse_state(row: &JournalState) -> Result<EntryState, String> {
         runtime_risk_mask: hex_field(&row.message, "runtime_risk_mask")?,
         reason: field(&row.message, "reason")?,
         generation: field(&row.message, "generation")?,
+    })
+}
+
+fn parse_risk_state(row: &JournalState) -> Result<RiskState, String> {
+    Ok(RiskState {
+        observed_at: row.observed_at,
+        runtime_risk_mask: hex_field(&row.message, "runtime_risk_mask")?,
+        symbol_risk_combined_mask: hex_field(&row.message, "symbol_risk_combined_mask")?,
+        symbol_risk_affected: hex_field(&row.message, "symbol_risk_affected")?,
+        order_guard_account_mask: hex_field(&row.message, "order_guard_account_mask")?,
+        order_guard_symbol_combined_mask: hex_field(
+            &row.message,
+            "order_guard_symbol_combined_mask",
+        )?,
+        order_guard_symbol_affected: hex_field(&row.message, "order_guard_symbol_affected")?,
     })
 }
 
@@ -716,12 +798,37 @@ mod tests {
         }
     }
 
+    fn risk_row(
+        name: &str,
+        seconds: i64,
+        runtime: &str,
+        symbol: &str,
+        account_guard: &str,
+        symbol_guard: &str,
+    ) -> JournalState {
+        JournalState {
+            unit: format!("{name}.service"),
+            message: format!(
+                "[INFO] event=risk_state runtime_risk_mask={runtime} symbol_risk_combined_mask={symbol} symbol_risk_affected=00000000 order_guard_account_mask={account_guard} order_guard_symbol_combined_mask={symbol_guard} order_guard_symbol_affected=00000000"
+            ),
+            observed_at: Utc.timestamp_opt(seconds, 0).unwrap(),
+        }
+    }
+
+    fn healthy_risk_rows(seconds: i64) -> Vec<JournalState> {
+        instances()
+            .iter()
+            .map(|instance| risk_row(&instance.name, seconds, "00000000", "00000000", "00", "00"))
+            .collect()
+    }
+
     #[test]
     fn reports_all_instances_healthy() {
-        let rows = instances()
+        let mut rows = instances()
             .iter()
             .map(|instance| row(&instance.name, 100, 1, 1, "00000000"))
             .collect::<Vec<_>>();
+        rows.extend(healthy_risk_rows(100));
         let observation = evaluate(
             &check(),
             &instances(),
@@ -750,12 +857,13 @@ mod tests {
 
     #[test]
     fn reports_risk_operator_and_effective_entry_failures() {
-        let rows = vec![
+        let mut rows = vec![
             row("live_mm1", 100, 1, 1, "00000000"),
             row("live_mm2", 100, 1, 0, "00000002"),
             row("live_mm3", 100, 0, 0, "00000000"),
             row("live_mm4", 100, 1, 1, "00000000"),
         ];
+        rows.extend(healthy_risk_rows(100));
         let observation = evaluate(
             &check(),
             &instances(),
@@ -773,8 +881,69 @@ mod tests {
     }
 
     #[test]
+    fn reports_each_nonzero_risk_mask() {
+        let cases = [
+            ("00000002", "00000000", "00", "00", "runtime=0x00000002"),
+            ("00000000", "00000004", "00", "00", "symbol=0x00000004"),
+            ("00000000", "00000000", "14", "00", "guard_account=0x14"),
+            ("00000000", "00000000", "00", "08", "guard_symbol=0x08"),
+        ];
+        for (runtime, symbol, account_guard, symbol_guard, detail) in cases {
+            let mut rows = instances()
+                .iter()
+                .map(|instance| row(&instance.name, 100, 1, 1, "00000000"))
+                .collect::<Vec<_>>();
+            rows.extend(healthy_risk_rows(100));
+            rows.push(risk_row(
+                "live_mm2",
+                101,
+                runtime,
+                symbol,
+                account_guard,
+                symbol_guard,
+            ));
+            let observation = evaluate(
+                &check(),
+                &instances(),
+                &active_units(),
+                &rows,
+                Utc.timestamp_opt(105, 0).unwrap(),
+                None,
+            );
+            assert!(matches!(
+                observation.status,
+                crate::model::ObservationStatus::Unhealthy(Severity::Critical)
+            ));
+            assert!(observation.summary.contains("live_mm2"));
+            assert!(observation.details["实例状态"].contains(detail));
+        }
+    }
+
+    #[test]
+    fn reports_missing_risk_snapshot() {
+        let rows = instances()
+            .iter()
+            .map(|instance| row(&instance.name, 100, 1, 1, "00000000"))
+            .collect::<Vec<_>>();
+        let observation = evaluate(
+            &check(),
+            &instances(),
+            &active_units(),
+            &rows,
+            Utc.timestamp_opt(105, 0).unwrap(),
+            None,
+        );
+        assert!(matches!(
+            observation.status,
+            crate::model::ObservationStatus::Unhealthy(Severity::Critical)
+        ));
+        assert!(observation.details["实例状态"].contains("risk_state missing"));
+    }
+
+    #[test]
     fn active_units_do_not_fail_when_state_log_is_absent_or_old() {
-        let rows = vec![row("live_mm1", 70, 1, 1, "00000000")];
+        let mut rows = vec![row("live_mm1", 70, 1, 1, "00000000")];
+        rows.extend(healthy_risk_rows(100));
         let observation = evaluate(
             &check(),
             &instances(),
@@ -824,6 +993,7 @@ mod tests {
             .iter()
             .map(|instance| row(&instance.name, 100, 1, 1, "00000000"))
             .collect::<Vec<_>>();
+        rows.extend(healthy_risk_rows(100));
         for instance in instances() {
             rows.push(JournalState {
                 unit: instance.unit.clone(),
@@ -861,6 +1031,7 @@ mod tests {
             .iter()
             .map(|instance| row(&instance.name, 100, 1, 1, "00000000"))
             .collect::<Vec<_>>();
+        rows.extend(healthy_risk_rows(100));
         rows.push(JournalState {
             unit: "live_mm1.service".into(),
             message: "[INFO] event=strategy_symbol_stats snapshot_id=9 coin=APE".into(),
