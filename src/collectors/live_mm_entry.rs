@@ -28,6 +28,14 @@ struct JournalState {
     observed_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UnitState {
+    unit: String,
+    load: String,
+    active: String,
+    sub: String,
+}
+
 #[derive(Clone, Debug)]
 struct StrategyStats {
     snapshot_id: u64,
@@ -52,13 +60,14 @@ pub fn collect(
     let horizon = statistics_stale_after
         .unwrap_or(stale_after)
         .max(stale_after);
+    let units = read_unit_states(instances, timeout)?;
     let rows = read_latest(instances, horizon, timeout)?;
     Ok(evaluate(
         check,
         instances,
+        &units,
         &rows,
         Utc::now(),
-        stale_after,
         statistics_stale_after,
     ))
 }
@@ -66,34 +75,44 @@ pub fn collect(
 fn evaluate(
     check: &CheckConfig,
     instances: &[LiveMmInstance],
+    units: &[UnitState],
     rows: &[JournalState],
     now: DateTime<Utc>,
-    stale_after: Duration,
     statistics_stale_after: Option<Duration>,
 ) -> Observation {
     let latest = latest_by_unit(rows);
     let statistics = latest_statistics_by_unit(rows);
+    let units = units
+        .iter()
+        .map(|state| (state.unit.as_str(), state))
+        .collect::<HashMap<_, _>>();
     let mut failures = Vec::new();
     let mut details = Vec::new();
 
     for instance in instances {
-        let result = latest
-            .get(instance.unit.as_str())
-            .ok_or_else(|| "状态缺失".to_owned())
-            .and_then(|row| {
-                let age = now
-                    .signed_duration_since(row.observed_at)
-                    .to_std()
-                    .unwrap_or(Duration::ZERO);
-                if age > stale_after {
-                    return Err(format!("状态过期 age={}s", age.as_secs()));
-                }
-                parse_state(row).map(|state| (state, age))
-            });
+        let unit = units.get(instance.unit.as_str());
+        let unit_active =
+            unit.is_some_and(|state| state.load == "loaded" && state.active == "active");
+        if !unit_active {
+            let state = unit
+                .map(|state| format!("{}/{}/{}", state.load, state.active, state.sub))
+                .unwrap_or_else(|| "状态缺失".to_owned());
+            details.push(format!(
+                "{} unit={} systemd={}",
+                instance.name, instance.unit, state
+            ));
+            failures.push(instance.name.clone());
+            continue;
+        }
 
-        match result {
-            Ok((state, age)) => {
-                details.push(format!(
+        match latest.get(instance.unit.as_str()) {
+            Some(row) => match parse_state(row) {
+                Ok(state) => {
+                    let age = now
+                        .signed_duration_since(row.observed_at)
+                        .to_std()
+                        .unwrap_or(Duration::ZERO);
+                    details.push(format!(
                     "{} unit={} operator={} entries={} risk=0x{:08x} reason={} generation={} age={}s",
                     instance.name,
                     instance.unit,
@@ -104,19 +123,26 @@ fn evaluate(
                     state.generation,
                     age.as_secs()
                 ));
-                if state.operator_enabled != 1
-                    || state.entries_enabled != 1
-                    || state.runtime_risk_mask != 0
-                {
+                    if state.operator_enabled != 1
+                        || state.entries_enabled != 1
+                        || state.runtime_risk_mask != 0
+                    {
+                        failures.push(instance.name.clone());
+                    }
+                }
+                Err(error) => {
+                    details.push(format!(
+                        "{} unit={} systemd=active {}",
+                        instance.name, instance.unit, error
+                    ));
                     failures.push(instance.name.clone());
                 }
-            }
-            Err(error) => {
+            },
+            None => {
                 details.push(format!(
-                    "{} unit={} {}",
-                    instance.name, instance.unit, error
+                    "{} unit={} systemd=active 状态日志未更新（不作为门禁）",
+                    instance.name, instance.unit
                 ));
-                failures.push(instance.name.clone());
             }
         }
 
@@ -169,6 +195,57 @@ fn evaluate(
         );
     }
     observation
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_unit_states(
+    _instances: &[LiveMmInstance],
+    _timeout: Duration,
+) -> Result<Vec<UnitState>, CollectError> {
+    Err(CollectError::Unsupported("systemd requires Linux".into()))
+}
+
+#[cfg(target_os = "linux")]
+fn read_unit_states(
+    instances: &[LiveMmInstance],
+    timeout: Duration,
+) -> Result<Vec<UnitState>, CollectError> {
+    let mut arguments = vec!["show"];
+    arguments.extend(instances.iter().map(|instance| instance.unit.as_str()));
+    arguments.push("--property=Id,LoadState,ActiveState,SubState");
+    let output = command::run("systemctl", &arguments, timeout)?;
+    if !output.status.success() {
+        return Err(CollectError::Invalid(format!(
+            "systemctl show exited {}",
+            output.status
+        )));
+    }
+    parse_unit_states(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_unit_states(text: &str) -> Result<Vec<UnitState>, CollectError> {
+    let mut states = Vec::new();
+    let mut fields = HashMap::new();
+    for line in text.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            if let Some(unit) = fields.remove("Id") {
+                states.push(UnitState {
+                    unit,
+                    load: fields.remove("LoadState").unwrap_or_default(),
+                    active: fields.remove("ActiveState").unwrap_or_default(),
+                    sub: fields.remove("SubState").unwrap_or_default(),
+                });
+            }
+            fields.clear();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(CollectError::Invalid("malformed systemctl output".into()));
+        };
+        fields.insert(key, value.to_owned());
+    }
+    Ok(states)
 }
 
 fn latest_statistics_by_unit(rows: &[JournalState]) -> HashMap<&str, StrategyStats> {
@@ -617,6 +694,18 @@ mod tests {
             .collect()
     }
 
+    fn active_units() -> Vec<UnitState> {
+        instances()
+            .into_iter()
+            .map(|instance| UnitState {
+                unit: instance.unit,
+                load: "loaded".into(),
+                active: "active".into(),
+                sub: "running".into(),
+            })
+            .collect()
+    }
+
     fn row(name: &str, seconds: i64, operator: u8, entries: u8, risk: &str) -> JournalState {
         JournalState {
             unit: format!("{name}.service"),
@@ -636,15 +725,27 @@ mod tests {
         let observation = evaluate(
             &check(),
             &instances(),
+            &active_units(),
             &rows,
             Utc.timestamp_opt(105, 0).unwrap(),
-            Duration::from_secs(20),
             None,
         );
         assert!(matches!(
             observation.status,
             crate::model::ObservationStatus::Healthy
         ));
+    }
+
+    #[test]
+    fn parses_systemd_activity_for_each_unit() {
+        let states = parse_unit_states(
+            "Id=live_mm1.service\nLoadState=loaded\nActiveState=active\nSubState=running\n\n\
+             Id=live_mm2.service\nLoadState=loaded\nActiveState=failed\nSubState=failed\n",
+        )
+        .unwrap();
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0].active, "active");
+        assert_eq!(states[1].active, "failed");
     }
 
     #[test]
@@ -658,9 +759,9 @@ mod tests {
         let observation = evaluate(
             &check(),
             &instances(),
+            &active_units(),
             &rows,
             Utc.timestamp_opt(105, 0).unwrap(),
-            Duration::from_secs(20),
             None,
         );
         assert!(matches!(
@@ -672,21 +773,40 @@ mod tests {
     }
 
     #[test]
-    fn reports_missing_stale_and_malformed_states() {
-        let rows = vec![
-            row("live_mm1", 70, 1, 1, "00000000"),
-            JournalState {
-                unit: "live_mm2.service".into(),
-                message: "[live_mm_host] entries_enabled=unknown".into(),
-                observed_at: Utc.timestamp_opt(100, 0).unwrap(),
-            },
-        ];
+    fn active_units_do_not_fail_when_state_log_is_absent_or_old() {
+        let rows = vec![row("live_mm1", 70, 1, 1, "00000000")];
         let observation = evaluate(
             &check(),
             &instances(),
+            &active_units(),
             &rows,
             Utc.timestamp_opt(105, 0).unwrap(),
-            Duration::from_secs(20),
+            None,
+        );
+        assert!(matches!(
+            observation.status,
+            crate::model::ObservationStatus::Healthy
+        ));
+        let details = &observation.details["实例状态"];
+        assert!(details.contains("systemd=active 状态日志未更新（不作为门禁）"));
+    }
+
+    #[test]
+    fn reports_inactive_unit_and_malformed_fresh_state() {
+        let rows = vec![JournalState {
+            unit: "live_mm2.service".into(),
+            message: "[live_mm_host] entries_enabled=unknown".into(),
+            observed_at: Utc.timestamp_opt(100, 0).unwrap(),
+        }];
+        let mut units = active_units();
+        units[2].active = "failed".into();
+        units[2].sub = "failed".into();
+        let observation = evaluate(
+            &check(),
+            &instances(),
+            &units,
+            &rows,
+            Utc.timestamp_opt(105, 0).unwrap(),
             None,
         );
         assert!(matches!(
@@ -694,9 +814,8 @@ mod tests {
             crate::model::ObservationStatus::Unhealthy(Severity::Critical)
         ));
         let details = &observation.details["实例状态"];
-        assert!(details.contains("状态过期"));
         assert!(details.contains("字段缺失 operator_enabled"));
-        assert!(details.contains("live_mm3 unit=live_mm3.service 状态缺失"));
+        assert!(details.contains("live_mm3 unit=live_mm3.service systemd=loaded/failed/failed"));
     }
 
     #[test]
@@ -720,9 +839,9 @@ mod tests {
         let observation = evaluate(
             &check(),
             &instances(),
+            &active_units(),
             &rows,
             Utc.timestamp_opt(105, 0).unwrap(),
-            Duration::from_secs(20),
             Some(Duration::from_secs(90)),
         );
         assert!(matches!(
@@ -750,9 +869,9 @@ mod tests {
         let observation = evaluate(
             &check(),
             &instances(),
+            &active_units(),
             &rows,
             Utc.timestamp_opt(105, 0).unwrap(),
-            Duration::from_secs(20),
             Some(Duration::from_secs(90)),
         );
         assert!(matches!(
