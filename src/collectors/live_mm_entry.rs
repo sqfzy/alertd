@@ -102,6 +102,7 @@ fn evaluate(
     let mut details = Vec::new();
 
     for instance in instances {
+        let mut instance_details = vec![instance.name.clone()];
         let unit = units.get(instance.unit.as_str());
         let unit_active =
             unit.is_some_and(|state| state.load == "loaded" && state.active == "active");
@@ -109,10 +110,10 @@ fn evaluate(
             let state = unit
                 .map(|state| format!("{}/{}/{}", state.load, state.active, state.sub))
                 .unwrap_or_else(|| "状态缺失".to_owned());
-            details.push(format!(
-                "{} unit={} systemd={}",
-                instance.name, instance.unit, state
-            ));
+            instance_details.push(format!("入口：unit={} systemd={}", instance.unit, state));
+            instance_details.push("风险：unavailable".to_owned());
+            instance_details.push("限频：unavailable".to_owned());
+            details.push(instance_details.join("\n"));
             failures.push(instance.name.clone());
             continue;
         }
@@ -124,17 +125,15 @@ fn evaluate(
                         .signed_duration_since(row.observed_at)
                         .to_std()
                         .unwrap_or(Duration::ZERO);
-                    details.push(format!(
-                    "{} unit={} operator={} entries={} risk=0x{:08x} reason={} generation={} age={}s",
-                    instance.name,
-                    instance.unit,
-                    state.operator_enabled,
-                    state.entries_enabled,
-                    state.runtime_risk_mask,
-                    state.reason,
-                    state.generation,
-                    age.as_secs()
-                ));
+                    instance_details.push(format!(
+                        "入口：operator={} entries={} reason={} generation={} age={}s unit={}",
+                        state.operator_enabled,
+                        state.entries_enabled,
+                        state.reason,
+                        state.generation,
+                        age.as_secs(),
+                        instance.unit,
+                    ));
                     if state.operator_enabled != 1
                         || state.entries_enabled != 1
                         || state.runtime_risk_mask != 0
@@ -143,17 +142,17 @@ fn evaluate(
                     }
                 }
                 Err(error) => {
-                    details.push(format!(
-                        "{} unit={} systemd=active {}",
-                        instance.name, instance.unit, error
+                    instance_details.push(format!(
+                        "入口：unit={} systemd=active {}",
+                        instance.unit, error
                     ));
                     failures.push(instance.name.clone());
                 }
             },
             None => {
-                details.push(format!(
-                    "{} unit={} systemd=active 状态日志未更新（不作为门禁）",
-                    instance.name, instance.unit
+                instance_details.push(format!(
+                    "入口：unit={} systemd=active 状态日志未更新（不作为门禁）",
+                    instance.unit
                 ));
             }
         }
@@ -165,16 +164,18 @@ fn evaluate(
                         .signed_duration_since(state.observed_at)
                         .to_std()
                         .unwrap_or(Duration::ZERO);
-                    details.push(format!(
-                        "{} risks runtime=0x{:08x} symbol=0x{:08x}/affected=0x{:08x} guard_account=0x{:02x} guard_symbol=0x{:02x}/affected=0x{:08x} age={}s",
-                        instance.name,
+                    instance_details.push(format!(
+                        "风险：runtime=0x{:08x} symbol=0x{:08x} affected=0x{:08x} age={}s",
                         state.runtime_risk_mask,
                         state.symbol_risk_combined_mask,
                         state.symbol_risk_affected,
+                        age.as_secs(),
+                    ));
+                    instance_details.push(format!(
+                        "限频：account=0x{:02x} symbol=0x{:02x} affected=0x{:08x}",
                         state.order_guard_account_mask,
                         state.order_guard_symbol_combined_mask,
                         state.order_guard_symbol_affected,
-                        age.as_secs(),
                     ));
                     if state.runtime_risk_mask != 0
                         || state.symbol_risk_combined_mask != 0
@@ -185,12 +186,14 @@ fn evaluate(
                     }
                 }
                 Err(error) => {
-                    details.push(format!("{} risk_state {}", instance.name, error));
+                    instance_details.push(format!("风险：risk_state {}", error));
+                    instance_details.push("限频：unknown".to_owned());
                     failures.push(instance.name.clone());
                 }
             },
             None => {
-                details.push(format!("{} risk_state missing", instance.name));
+                instance_details.push("风险：risk_state missing".to_owned());
+                instance_details.push("限频：unknown".to_owned());
                 failures.push(instance.name.clone());
             }
         }
@@ -204,9 +207,8 @@ fn evaluate(
                         .unwrap_or(Duration::ZERO);
                     if age > maximum_age {
                         failures.push(instance.name.clone());
-                        details.push(format!(
-                            "{} statistics stale snapshot_id={} age={}s",
-                            instance.name,
+                        instance_details.push(format!(
+                            "统计：stale snapshot_id={} age={}s",
                             snapshot.snapshot_id,
                             age.as_secs()
                         ));
@@ -214,10 +216,11 @@ fn evaluate(
                 }
                 None => {
                     failures.push(instance.name.clone());
-                    details.push(format!("{} statistics missing", instance.name));
+                    instance_details.push("统计：missing".to_owned());
                 }
             }
         }
+        details.push(instance_details.join("\n"));
     }
 
     failures.sort();
@@ -884,9 +887,27 @@ mod tests {
     fn reports_each_nonzero_risk_mask() {
         let cases = [
             ("00000002", "00000000", "00", "00", "runtime=0x00000002"),
-            ("00000000", "00000004", "00", "00", "symbol=0x00000004"),
-            ("00000000", "00000000", "14", "00", "guard_account=0x14"),
-            ("00000000", "00000000", "00", "08", "guard_symbol=0x08"),
+            (
+                "00000000",
+                "00000004",
+                "00",
+                "00",
+                "风险：runtime=0x00000000 symbol=0x00000004",
+            ),
+            (
+                "00000000",
+                "00000000",
+                "14",
+                "00",
+                "限频：account=0x14 symbol=0x00",
+            ),
+            (
+                "00000000",
+                "00000000",
+                "00",
+                "08",
+                "限频：account=0x00 symbol=0x08",
+            ),
         ];
         for (runtime, symbol, account_guard, symbol_guard, detail) in cases {
             let mut rows = instances()
@@ -984,7 +1005,7 @@ mod tests {
         ));
         let details = &observation.details["实例状态"];
         assert!(details.contains("字段缺失 operator_enabled"));
-        assert!(details.contains("live_mm3 unit=live_mm3.service systemd=loaded/failed/failed"));
+        assert!(details.contains("live_mm3\n入口：unit=live_mm3.service systemd=loaded/failed/failed\n风险：unavailable\n限频：unavailable"));
     }
 
     #[test]
@@ -1049,7 +1070,28 @@ mod tests {
             observation.status,
             crate::model::ObservationStatus::Unhealthy(Severity::Critical)
         ));
-        assert!(observation.details["实例状态"].contains("statistics missing"));
+        assert!(observation.details["实例状态"].contains("统计：missing"));
+    }
+
+    #[test]
+    fn groups_entry_and_risk_lines_by_instance() {
+        let mut rows = instances()
+            .iter()
+            .map(|instance| row(&instance.name, 100, 1, 1, "00000000"))
+            .collect::<Vec<_>>();
+        rows.extend(healthy_risk_rows(100));
+        let observation = evaluate(
+            &check(),
+            &instances(),
+            &active_units(),
+            &rows,
+            Utc.timestamp_opt(105, 0).unwrap(),
+            None,
+        );
+        let details = &observation.details["实例状态"];
+        assert!(details.contains(
+            "live_mm1\n入口：operator=1 entries=1 reason=2 generation=7 age=5s unit=live_mm1.service\n风险：runtime=0x00000000 symbol=0x00000000 affected=0x00000000 age=5s\n限频：account=0x00 symbol=0x00 affected=0x00000000\n\nlive_mm2"
+        ));
     }
 
     #[test]
