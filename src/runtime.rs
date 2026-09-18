@@ -8,7 +8,7 @@ use crate::{
     state::{self, PersistentState},
     systemd_notify,
 };
-use chrono::{Local, Utc};
+use chrono::Utc;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::{
@@ -527,7 +527,7 @@ fn maybe_daily(
     let Some(target) = &config.alarm.daily_report_at else {
         return;
     };
-    let now = Local::now();
+    let now = report::beijing_time(Utc::now());
     let current = now.format("%H:%M").to_string();
     let date = now.format("%Y-%m-%d").to_string();
     if target == "off" || current < *target || persistent.last_daily_date.as_deref() == Some(&date)
@@ -614,7 +614,7 @@ fn maybe_statistics_reports(
         if enqueue(
             queue,
             Severity::Ok,
-            report::format_statistics(report_context, interval, &body),
+            report::format_statistics(report_context, interval, now, &body),
             dry_run,
         ) {
             state.last_statistics_report_bucket = Some(bucket);

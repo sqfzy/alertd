@@ -29,6 +29,7 @@ fn alert_fields_are_separate_markdown_paragraphs() {
     assert!(text.contains("\n\n**IP：** 52.221.32.231"));
     assert!(text.contains("\n\n**检查：** data-disk"));
     assert!(text.contains("\n\n**异常开始：**"));
+    assert!(text.contains("**异常开始：** 2026-08-12 15:47:58"));
     assert!(!text.contains("\n\n**开始：**"));
     assert!(text.contains("\n\n**挂载点：** /mnt/jt"));
 }
@@ -104,6 +105,22 @@ fn alert_omits_unconfigured_ip() {
         ip: None,
     };
     assert!(!report::format_alert(context, &event).contains("**IP：**"));
+}
+
+#[test]
+fn statistics_report_shows_previous_complete_beijing_period() {
+    let text = report::format_statistics(
+        ReportContext {
+            host: "bn-okx-gateway-live-mm",
+            ip: Some("54.178.56.195"),
+        },
+        std::time::Duration::from_secs(600),
+        Utc.with_ymd_and_hms(2026, 9, 18, 5, 37, 42).unwrap(),
+        "总体：3/3盘有统计",
+    );
+    assert!(
+        text.contains("**统计时间段：** 2026-09-18 13:20:00 ～ 2026-09-18 13:30:00（UTC+08:00）")
+    );
 }
 
 #[test]
