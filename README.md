@@ -1,6 +1,6 @@
 # alertd
 
-`alertd` 是一个轻量、配置驱动的 Linux 告警守护程序。每台机器运行一个实例，监控应用链路和主机运行态；异常、持续、恢复、日志事件和日报统一发送到钉钉。
+`alertd` 是一个轻量、配置驱动的 Linux 告警守护程序。每台机器运行一个实例，监控应用链路和主机运行态；异常、持续、恢复、日志事件和日报发送到配置对应的钉钉 route。
 
 ```text
 Collector → Observation → Alarm Engine → Event → Durable Queue → DingTalk
@@ -18,7 +18,7 @@ chmod 0600 /etc/alertd/alertd.env
 
 target/release/alertd --config /etc/alertd/alertd.toml --check-config
 target/release/alertd --config /etc/alertd/alertd.toml --dry-run
-target/release/alertd --config /etc/alertd/alertd.toml --send-test
+target/release/alertd --config /etc/alertd/alertd.toml --send-test --delivery-route default
 ```
 
 最小配置：
@@ -64,6 +64,7 @@ journalctl -u alertd -n 200 --no-pager
 - `latest_file`：检查匹配文件的大小和 mtime 新鲜度。
 - `metrics_file`：读取原子覆盖的 JSON 数值快照，检查新鲜度和可选上下限，并纳入日报。
 - `metrics_shm`：可选校验 ABI 原始字节，定点读取固定类型数值，检查上下限并纳入日报。
+- `observation_file`：读取外部观察器原子覆盖的状态 JSON；其业务状态进入统一告警，已排版的专项报告可按 route 转发。
 - `disk`：检查挂载点容量与 inode 使用率。
 - `memory`：按 `MemAvailable/MemTotal` 检查可用内存。
 - `cpu`：连续采样并显示每个逻辑 CPU 的使用率。
@@ -76,6 +77,8 @@ journalctl -u alertd -n 200 --no-pager
 `metrics_file` 的生产者负责聚合业务数据，并以“同目录临时文件 + 原子 rename”更新不超过 64 KiB 的顶层 JSON 对象。alertd 只读取配置选中的有限数值，不保存历史或计算 average/max/p99；统计窗口和单位应体现在稳定的 key 名中。
 
 `metrics_shm` 按 `runtime.interval` 打开 POSIX SHM 一次，通过同一文件描述符读取可选 ABI hash 和配置字段；支持大小端整数与浮点数。生产者必须以自然对齐的原子写更新单个字段。alertd 提供单值最佳努力采样，不保证多个字段属于同一事务；需要跨字段一致性时使用原子 JSON 快照，或另行设计 seqlock。
+
+`observation_file` 是业务适配边界：外部程序用标准库生成不超过 64 KiB 的 JSON 快照，alertd 只验证协议、新鲜度与状态，不解析业务日志、字段或 counters。`forward_report=true` 时，report 的唯一 ID 成功进入持久队列后才记录；重复读取、重启和入队失败不会静默丢失报告。
 
 两类数值检查都可独立配置 `critical_below`、`warn_below`、`warn_above` 和 `critical_above`。下限使用 `<=`、上限使用 `>=`，达到边界即越线；四项全空时只进入日报。alertd 不支持表达式、多段区间、跨指标计算或单位换算。
 

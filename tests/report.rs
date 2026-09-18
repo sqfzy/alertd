@@ -225,13 +225,21 @@ metrics = [{ key = "value", offset = 0, value_type = "u64" }]
             ..Default::default()
         },
     );
-    let text = report::format_daily(context(None), &config.checks, &[cpu, metrics], &states, 2);
+    let queue_routes = BTreeMap::from([("default".into(), 1), ("live-mm".into(), 1)]);
+    let text = report::format_daily(
+        context(None),
+        &config.checks,
+        &[cpu, metrics],
+        &states,
+        2,
+        &queue_routes,
+    );
     assert!(text.contains("**每核 CPU：** cpu0 10% · cpu1 30%"));
     assert!(text.contains(
         "**业务指标：** latency: latency_p99_us=72 · samples=180000\nunavailable-metrics: 不可用"
     ));
     assert!(text.contains("**日志 24h：** WARN 3，ERROR 1"));
-    assert!(text.contains("**投递队列：** 待发送 2 条"));
+    assert!(text.contains("**投递队列：** 待发送 2 条（default 1 条，live-mm 1 条）"));
     assert!(!text.contains("**进程/systemd：**"));
     assert!(!text.contains("**SHM/文件链路：**"));
     assert!(!text.contains("**时钟/调优/网络：**"));
@@ -239,7 +247,14 @@ metrics = [{ key = "value", offset = 0, value_type = "u64" }]
 
 #[test]
 fn daily_report_omits_all_unconfigured_groups() {
-    let text = report::format_daily(context(None), &[], &[], &HashMap::new(), 0);
+    let text = report::format_daily(
+        context(None),
+        &[],
+        &[],
+        &HashMap::new(),
+        0,
+        &BTreeMap::new(),
+    );
     assert!(!text.contains("**主机资源：**"));
     assert!(!text.contains("**进程/systemd：**"));
     assert!(!text.contains("**SHM/文件链路：**"));
@@ -271,6 +286,7 @@ critical_offset = "5ms"
         &[failure],
         &HashMap::new(),
         0,
+        &BTreeMap::new(),
     );
     assert!(text.contains("**时钟/调优/网络：** clock: 采集不可用（chronyc timeout）"));
 }
@@ -292,7 +308,14 @@ fn every_message_kind_includes_the_same_identity() {
         report::format_alert(context(None), &make_event(Transition::Firing)),
         report::format_alert(context(None), &make_event(Transition::Repeating)),
         report::format_alert(context(None), &make_event(Transition::Resolved)),
-        report::format_daily(context(None), &[], &[], &HashMap::new(), 0),
+        report::format_daily(
+            context(None),
+            &[],
+            &[],
+            &HashMap::new(),
+            0,
+            &BTreeMap::new(),
+        ),
         report::format_internal(context(None), Severity::Warn, "title", "detail"),
         report::format_test(context(None)),
     ];

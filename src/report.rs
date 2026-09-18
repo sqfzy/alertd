@@ -3,7 +3,7 @@ use crate::{
     model::{AlertEvent, CheckState, Observation, ObservationStatus, Severity, Transition},
 };
 use chrono::{DateTime, FixedOffset, Local, TimeZone, Utc};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ReportContext<'a> {
@@ -145,6 +145,7 @@ pub fn format_daily(
     observations: &[Observation],
     states: &HashMap<String, CheckState>,
     queue_pending: usize,
+    queue_routes: &BTreeMap<String, usize>,
 ) -> String {
     let mut text = "📋 **DAILY**".to_string();
     push_field(&mut text, "主机", context.host);
@@ -205,6 +206,9 @@ pub fn format_daily(
             CheckKind::MetricsFile { .. } | CheckKind::MetricsShm { .. } => {
                 business_metrics.push(format_metrics_report(check, observation));
             }
+            CheckKind::ObservationFile { .. } => {
+                business_metrics.push(format_external_observation(check, observation));
+            }
             CheckKind::Journal { .. } => {
                 journal_checks += 1;
                 if let Some(state) = states.get(&check.name) {
@@ -256,7 +260,17 @@ pub fn format_daily(
     if !platform.is_empty() {
         push_field(&mut text, "时钟/调优/网络", &platform.join("\n"));
     }
-    push_field(&mut text, "投递队列", &format!("待发送 {queue_pending} 条"));
+    let routes = queue_routes
+        .iter()
+        .map(|(route, count)| format!("{route} {count} 条"))
+        .collect::<Vec<_>>()
+        .join("，");
+    let queue = if routes.is_empty() {
+        format!("待发送 {queue_pending} 条")
+    } else {
+        format!("待发送 {queue_pending} 条（{routes}）")
+    };
+    push_field(&mut text, "投递队列", &queue);
     text
 }
 
@@ -314,6 +328,18 @@ pub fn format_statistics(
     text
 }
 
+/// 外部观察器已完成业务排版，alertd 只补充稳定的主机身份和标题。
+pub fn format_external_report(context: ReportContext<'_>, title: &str, body: &str) -> String {
+    let mut text = format!("📊 **{title}**");
+    push_field(&mut text, "主机", context.host);
+    if let Some(ip) = context.ip {
+        push_field(&mut text, "IP", ip);
+    }
+    text.push_str("\n\n");
+    text.push_str(body);
+    text
+}
+
 pub fn beijing_time(value: DateTime<Utc>) -> DateTime<FixedOffset> {
     value.with_timezone(&FixedOffset::east_opt(8 * 3600).expect("UTC+08:00 is valid"))
 }
@@ -357,6 +383,13 @@ fn format_metrics_report(check: &CheckConfig, observation: Option<&Observation>)
         .map(|metrics| metrics.replace('\n', " · "))
         .unwrap_or_else(|| observation.summary.clone());
     format!("{}: {value}", check.name)
+}
+
+fn format_external_observation(check: &CheckConfig, observation: Option<&Observation>) -> String {
+    let Some(observation) = observation else {
+        return format!("{}: 不可用", check.name);
+    };
+    format!("{}: {}", check.name, observation.summary)
 }
 
 fn format_unavailable_check(check: &CheckConfig, observations: &[Observation]) -> String {

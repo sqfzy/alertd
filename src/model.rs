@@ -40,6 +40,7 @@ pub struct Observation {
     pub event: bool,
     pub warn_occurrences: u64,
     pub critical_occurrences: u64,
+    pub external_report: Option<ExternalReport>,
 }
 
 impl Observation {
@@ -53,6 +54,7 @@ impl Observation {
             event: false,
             warn_occurrences: 0,
             critical_occurrences: 0,
+            external_report: None,
         }
     }
 
@@ -66,6 +68,7 @@ impl Observation {
             event: false,
             warn_occurrences: 0,
             critical_occurrences: 0,
+            external_report: None,
         }
     }
 
@@ -80,6 +83,18 @@ impl Observation {
         self.critical_occurrences = critical;
         self
     }
+
+    pub fn external_report(mut self, report: ExternalReport) -> Self {
+        self.external_report = Some(report);
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalReport {
+    pub id: String,
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +139,8 @@ pub struct CheckState {
     pub last_statistics_report_bucket: Option<String>,
     #[serde(default)]
     pub statistics_report_baselines: BTreeMap<String, StatisticsBaseline>,
+    #[serde(default)]
+    pub last_external_report_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

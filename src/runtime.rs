@@ -15,7 +15,7 @@ use chrono::Utc;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, RwLock,
@@ -82,25 +82,29 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
     }
     persistent.clean_shutdown = Some(false);
     state::save(&config.runtime.state_dir, &persistent)?;
-    let dingtalk = if options.dry_run {
-        None
-    } else {
-        Some(build_client(&config)?)
-    };
+    let dingtalk = (!options.dry_run)
+        .then(|| build_clients(&config))
+        .transpose()?;
     let stop = Arc::new(AtomicBool::new(false));
     let reload = Arc::new(AtomicBool::new(false));
     flag::register(SIGINT, stop.clone())?;
     flag::register(SIGTERM, stop.clone())?;
     flag::register(SIGHUP, reload.clone())?;
-    let delivery_worker = dingtalk.map(|client| {
-        start_delivery_worker(
-            queue.clone(),
-            client,
-            &config,
-            identity.clone(),
-            stop.clone(),
-        )
-    });
+    report_unknown_spool_routes(&queue, &config, initial_context, options.dry_run);
+    let delivery_workers = dingtalk
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(route, client)| {
+            start_delivery_worker(
+                queue.clone(),
+                route,
+                client,
+                &config,
+                identity.clone(),
+                stop.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
     let mut context = CollectContext {
         journal_cursors: persistent.journal_cursors.clone(),
         command_timeout: config::parse_duration(&config.runtime.command_timeout)?,
@@ -155,6 +159,14 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
             options.dry_run,
             &observations,
         );
+        maybe_external_reports(
+            &config,
+            report_context,
+            &mut persistent,
+            &queue,
+            options.dry_run,
+            &observations,
+        );
         check_queue_health(
             &config,
             report_context,
@@ -183,7 +195,7 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
     if let Err(error) = state::save(&config.runtime.state_dir, &persistent) {
         error!(%error, "cannot persist clean shutdown state");
     }
-    if let Some(worker) = delivery_worker {
+    for worker in delivery_workers {
         let _ = worker.join();
     }
     Ok(())
@@ -193,13 +205,22 @@ pub fn send_test(
     config: &Config,
     config_sha256: String,
     dry_run: bool,
+    route_name: &str,
 ) -> Result<(), RuntimeError> {
     let identity = identity::load_runtime_identity(config, config_sha256)?;
     let text = report::format_test(report_context(&identity));
     if dry_run {
         println!("{text}");
     } else {
-        build_client(config)?.send(&text, false)?;
+        let route = config
+            .delivery
+            .routes
+            .iter()
+            .find(|route| route.name == route_name)
+            .ok_or_else(|| {
+                config::ConfigError::Invalid(format!("unknown delivery route {route_name}"))
+            })?;
+        build_client(route, config)?.send(&text, false)?;
     }
     Ok(())
 }
@@ -447,7 +468,14 @@ fn process_observation(
         return true;
     };
     let text = report::format_alert(report_context, &event);
-    let accepted = enqueue_check(queue, &check.name, event.severity, text, dry_run);
+    let accepted = enqueue_check(
+        queue,
+        &check.name,
+        &check.delivery_route,
+        event.severity,
+        text,
+        dry_run,
+    );
     if !accepted {
         *state = previous;
     }
@@ -474,6 +502,7 @@ fn enqueue(queue: &DeliveryQueue, severity: Severity, text: String, dry_run: boo
 fn enqueue_check(
     queue: &DeliveryQueue,
     check_name: &str,
+    delivery_route: &str,
     severity: Severity,
     text: String,
     dry_run: bool,
@@ -482,13 +511,13 @@ fn enqueue_check(
         println!("--- alertd dry-run ---\n{text}\n");
         return true;
     }
-    match queue.enqueue_check(check_name, severity, text) {
+    match queue.enqueue_check(check_name, delivery_route, severity, text) {
         Ok(id) => {
-            info!(%id, %check_name, "alert queued");
+            info!(%id, %check_name, route = delivery_route, "alert queued");
             true
         }
         Err(error) => {
-            error!(%error, %check_name, "ALERT LOST: durable queue rejected message");
+            error!(%error, %check_name, route = delivery_route, "ALERT LOST: durable queue rejected message");
             false
         }
     }
@@ -524,10 +553,11 @@ enum DrainOutcome {
 
 fn drain_once(
     queue: &DeliveryQueue,
+    route: &str,
     client: &DingTalkClient,
     context: report::ReportContext<'_>,
 ) -> DrainOutcome {
-    match queue.oldest() {
+    match queue.oldest_for_route(route) {
         Ok(Some((path, message))) => {
             match client.send(&message.text, message.severity == Severity::Critical) {
                 Ok(()) => {
@@ -568,6 +598,7 @@ fn drain_once(
 
 fn start_delivery_worker(
     queue: DeliveryQueue,
+    route: String,
     client: DingTalkClient,
     config: &Config,
     identity: Arc<RwLock<RuntimeIdentity>>,
@@ -583,16 +614,35 @@ fn start_delivery_worker(
         while !stop.load(Ordering::Relaxed) {
             let current = read_identity(&identity);
             let context = report_context(&current);
-            match drain_once(&queue, &client, context) {
+            match drain_once(&queue, &route, &client, context) {
                 DrainOutcome::Failed => {
                     consecutive_failures = consecutive_failures.saturating_add(1);
-                    degraded |= consecutive_failures >= failure_report_after;
+                    if !degraded && consecutive_failures >= failure_report_after {
+                        degraded = true;
+                        enqueue_internal(
+                            &queue,
+                            Severity::Warn,
+                            report::format_internal(
+                                context,
+                                Severity::Warn,
+                                "钉钉投递持续失败",
+                                &format!(
+                                    "route={route} 已连续失败 {consecutive_failures} 次；该 route 的消息正在独立重试"
+                                ),
+                            ),
+                            false,
+                        );
+                    }
                     sleep_worker(retry, &stop);
                     retry = retry.saturating_mul(2).min(maximum);
                 }
                 DrainOutcome::Delivered | DrainOutcome::Idle => {
                     retry = initial;
-                    if degraded && queue.pending_count().is_ok_and(|count| count == 0) {
+                    if degraded
+                        && queue
+                            .oldest_for_route(&route)
+                            .is_ok_and(|message| message.is_none())
+                    {
                         enqueue_internal(
                             &queue,
                             Severity::Ok,
@@ -600,7 +650,9 @@ fn start_delivery_worker(
                                 context,
                                 Severity::Ok,
                                 "钉钉投递已恢复",
-                                &format!("连续失败 {consecutive_failures} 次，积压已清空"),
+                                &format!(
+                                    "route={route} 连续失败 {consecutive_failures} 次，积压已清空"
+                                ),
                             ),
                             false,
                         );
@@ -648,6 +700,7 @@ fn maybe_daily(
             observations,
             &persistent.checks,
             queue.pending_count().unwrap_or_default(),
+            &queue.pending_counts().unwrap_or_default(),
         ),
         dry_run,
     ) {
@@ -724,6 +777,46 @@ fn maybe_statistics_reports(
         ) {
             state.last_statistics_report_bucket = Some(bucket);
             state.statistics_report_baselines = next_baselines;
+        }
+    }
+}
+
+fn maybe_external_reports(
+    config: &Config,
+    report_context: report::ReportContext<'_>,
+    persistent: &mut PersistentState,
+    queue: &DeliveryQueue,
+    dry_run: bool,
+    observations: &[Observation],
+) {
+    for check in config.checks.iter().filter(|check| check.enabled) {
+        let config::CheckKind::ObservationFile {
+            forward_report: true,
+            ..
+        } = check.kind
+        else {
+            continue;
+        };
+        let Some(report) = observations
+            .iter()
+            .find(|observation| observation.check_name == check.name)
+            .and_then(|observation| observation.external_report.as_ref())
+        else {
+            continue;
+        };
+        let state = persistent.checks.entry(check.name.clone()).or_default();
+        if state.last_external_report_id.as_deref() == Some(report.id.as_str()) {
+            continue;
+        }
+        if enqueue_check(
+            queue,
+            &check.name,
+            &check.delivery_route,
+            Severity::Ok,
+            report::format_external_report(report_context, &report.title, &report.body),
+            dry_run,
+        ) {
+            state.last_external_report_id = Some(report.id.clone());
         }
     }
 }
@@ -926,9 +1019,22 @@ fn report_context(identity: &RuntimeIdentity) -> report::ReportContext<'_> {
     }
 }
 
-fn build_client(config: &Config) -> Result<DingTalkClient, RuntimeError> {
-    let (token, secret) = config::resolve_dingtalk_credentials(&config.delivery)?;
+fn build_clients(config: &Config) -> Result<HashMap<String, DingTalkClient>, RuntimeError> {
+    config
+        .delivery
+        .routes
+        .iter()
+        .map(|route| Ok((route.name.clone(), build_client(route, config)?)))
+        .collect()
+}
+
+fn build_client(
+    route: &config::DeliveryRoute,
+    config: &Config,
+) -> Result<DingTalkClient, RuntimeError> {
+    let (token, secret) = config::resolve_dingtalk_credentials(route)?;
     info!(
+        route = %route.name,
         signing_enabled = secret.is_some(),
         "DingTalk delivery credentials resolved"
     );
@@ -936,8 +1042,47 @@ fn build_client(config: &Config) -> Result<DingTalkClient, RuntimeError> {
         token,
         secret,
         config::parse_duration(&config.delivery.timeout)?,
-        config.delivery.at_all_on_critical,
+        route.at_all_on_critical,
     )?)
+}
+
+fn report_unknown_spool_routes(
+    queue: &DeliveryQueue,
+    config: &Config,
+    context: report::ReportContext<'_>,
+    dry_run: bool,
+) {
+    let configured: HashSet<_> = config
+        .delivery
+        .routes
+        .iter()
+        .map(|route| route.name.as_str())
+        .collect();
+    let Ok(routes) = queue.routes() else {
+        return;
+    };
+    for route in routes
+        .into_iter()
+        .filter(|route| !configured.contains(route.as_str()))
+    {
+        let pending = queue
+            .oldest_for_route(&route)
+            .map(|item| usize::from(item.is_some()))
+            .unwrap_or_default();
+        if pending != 0 {
+            enqueue_internal(
+                queue,
+                Severity::Warn,
+                report::format_internal(
+                    context,
+                    Severity::Warn,
+                    "发现未配置的投递路由",
+                    &format!("route={route} 的既有消息被保留，未改投其他机器人"),
+                ),
+                dry_run,
+            );
+        }
+    }
 }
 
 fn check_queue_health(
@@ -1046,6 +1191,10 @@ mod tests {
     fn config() -> Config {
         toml::from_str(
             r#"
+[delivery]
+[[delivery.routes]]
+name = "default"
+token_env = "TEST_TOKEN"
 [runtime]
 state_dir = "/tmp/alertd"
 [[checks]]
@@ -1113,10 +1262,60 @@ critical_available_pct = 10
     }
 
     #[test]
+    fn external_report_is_recorded_only_after_queue_acceptance() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.checks[0].name = "external".into();
+        config.checks[0].kind = config::CheckKind::ObservationFile {
+            path: "/run/external.json".into(),
+            stale_after: "30s".into(),
+            forward_report: true,
+        };
+        let observation = Observation::healthy("external", "正常").external_report(
+            crate::model::ExternalReport {
+                id: "report-1".into(),
+                title: "专项报告".into(),
+                body: "正文".into(),
+            },
+        );
+        let queue = DeliveryQueue::open(temporary.path(), 16).unwrap();
+        let mut persistent = PersistentState::default();
+
+        maybe_external_reports(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &queue,
+            false,
+            std::slice::from_ref(&observation),
+        );
+        maybe_external_reports(
+            &config,
+            test_report_context(),
+            &mut persistent,
+            &queue,
+            false,
+            &[observation],
+        );
+
+        assert_eq!(queue.pending_count().unwrap(), 1);
+        assert_eq!(
+            persistent.checks["external"]
+                .last_external_report_id
+                .as_deref(),
+            Some("report-1")
+        );
+    }
+
+    #[test]
     fn hot_reload_updates_identity_only_after_success() {
         let temporary = tempfile::tempdir().unwrap();
         let config_path = temporary.path().join("alertd.toml");
         let initial_text = r#"
+[delivery]
+[[delivery.routes]]
+name = "default"
+token_env = "TEST_TOKEN"
 [runtime]
 host = "old-role"
 state_dir = "/tmp/alertd"
@@ -1177,6 +1376,10 @@ critical_available_pct = 10
         let config_path = temporary.path().join("alertd.toml");
         let initial_text = format!(
             r#"
+[delivery]
+[[delivery.routes]]
+name = "default"
+token_env = "TEST_TOKEN"
 [runtime]
 enabled = true
 state_dir = "{}"
@@ -1201,7 +1404,12 @@ critical_available_pct = 10
         }));
         let queue = DeliveryQueue::open(temporary.path(), 16).unwrap();
         queue
-            .enqueue_check("memory", Severity::Critical, "already queued".into())
+            .enqueue_check(
+                "memory",
+                "default",
+                Severity::Critical,
+                "already queued".into(),
+            )
             .unwrap();
         let mut persistent = PersistentState {
             monitoring_enabled: Some(true),

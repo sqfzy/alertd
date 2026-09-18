@@ -42,15 +42,6 @@ fn default_daily() -> Option<String> {
 fn default_statistics_report_every() -> String {
     "off".into()
 }
-fn default_token_env() -> String {
-    "ALERTD_DINGTALK_TOKEN".into()
-}
-fn default_secret_env() -> String {
-    "ALERTD_DINGTALK_SECRET".into()
-}
-fn default_signed() -> bool {
-    true
-}
 fn default_timeout() -> String {
     "3s".into()
 }
@@ -170,12 +161,7 @@ impl Default for AlarmConfig {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeliveryConfig {
-    #[serde(default = "default_signed")]
-    pub signed: bool,
-    #[serde(default = "default_token_env")]
-    pub token_env: String,
-    #[serde(default = "default_secret_env")]
-    pub secret_env: String,
+    pub routes: Vec<DeliveryRoute>,
     #[serde(default = "default_timeout")]
     pub timeout: String,
     #[serde(default = "default_capacity")]
@@ -188,23 +174,29 @@ pub struct DeliveryConfig {
     pub retry_initial: String,
     #[serde(default = "default_retry_max")]
     pub retry_max: String,
-    pub at_all_on_critical: bool,
 }
 impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
-            signed: default_signed(),
-            token_env: default_token_env(),
-            secret_env: default_secret_env(),
+            routes: Vec::new(),
             timeout: default_timeout(),
             queue_capacity: default_capacity(),
             queue_warn_pct: default_queue_warn_pct(),
             failure_report_after: default_failure_report_after(),
             retry_initial: default_retry_initial(),
             retry_max: default_retry_max(),
-            at_all_on_critical: false,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryRoute {
+    pub name: String,
+    pub token_env: String,
+    pub secret_env: Option<String>,
+    #[serde(default)]
+    pub at_all_on_critical: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -240,6 +232,12 @@ pub enum CheckKind {
         statistics_stale_after: Option<String>,
         #[serde(default = "default_statistics_report_every")]
         statistics_report_every: String,
+    },
+    ObservationFile {
+        path: PathBuf,
+        stale_after: String,
+        #[serde(default)]
+        forward_report: bool,
     },
     Systemd {
         units: Vec<String>,
@@ -311,8 +309,14 @@ pub struct CheckConfig {
     pub pending_for: Option<String>,
     pub recover_for: Option<String>,
     pub runbook: Option<String>,
+    #[serde(default = "default_delivery_route")]
+    pub delivery_route: String,
     #[serde(flatten)]
     pub kind: CheckKind,
+}
+
+fn default_delivery_route() -> String {
+    "default".into()
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -567,6 +571,13 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
             "delivery.failure_report_after outside 1..=100".into(),
         ));
     }
+    validate_delivery_routes(&config.delivery.routes)?;
+    let routes: HashSet<_> = config
+        .delivery
+        .routes
+        .iter()
+        .map(|route| route.name.as_str())
+        .collect();
     let mut names = HashSet::new();
     for check in &config.checks {
         if check.name.is_empty() || check.name.len() > 128 || !names.insert(&check.name) {
@@ -579,6 +590,12 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
             return Err(ConfigError::Invalid(format!(
                 "check {} severity cannot be ok",
                 check.name
+            )));
+        }
+        if !routes.contains(check.delivery_route.as_str()) {
+            return Err(ConfigError::Invalid(format!(
+                "check {} references unknown delivery route {:?}",
+                check.name, check.delivery_route
             )));
         }
         if let Some(value) = &check.pending_for {
@@ -756,6 +773,23 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
                     )));
                 }
             }
+            Ok(())
+        }
+        CheckKind::ObservationFile {
+            path, stale_after, ..
+        } => {
+            if !path.is_absolute() {
+                return Err(ConfigError::Invalid(format!(
+                    "check {} observation_file path must be absolute",
+                    check.name
+                )));
+            }
+            duration_range(
+                "checks.observation_file.stale_after",
+                stale_after,
+                interval,
+                Duration::from_secs(86400),
+            )?;
             Ok(())
         }
         CheckKind::Systemd { units }
@@ -1028,15 +1062,61 @@ fn valid_posix_shm_name(path: &str) -> bool {
         && !path.contains('\0')
 }
 
+fn validate_delivery_routes(routes: &[DeliveryRoute]) -> Result<(), ConfigError> {
+    if routes.is_empty() || routes.len() > 16 {
+        return Err(ConfigError::Invalid(
+            "delivery.routes must contain 1..=16 routes".into(),
+        ));
+    }
+    let mut names = HashSet::new();
+    for route in routes {
+        if !valid_route_name(&route.name)
+            || !names.insert(route.name.as_str())
+            || !valid_environment_name(&route.token_env)
+            || route
+                .secret_env
+                .as_deref()
+                .is_some_and(|name| !valid_environment_name(name))
+        {
+            return Err(ConfigError::Invalid(
+                "delivery routes need unique names and valid environment names".into(),
+            ));
+        }
+    }
+    if !names.contains("default") {
+        return Err(ConfigError::Invalid(
+            "delivery.routes must contain route named default".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_route_name(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value.bytes().enumerate().all(|(index, byte)| match byte {
+            b'a'..=b'z' | b'0'..=b'9' => true,
+            b'-' | b'_' => index != 0,
+            _ => false,
+        })
+}
+
+fn valid_environment_name(value: &str) -> bool {
+    value.bytes().enumerate().all(|(index, byte)| match byte {
+        b'A'..=b'Z' | b'a'..=b'z' | b'_' => true,
+        b'0'..=b'9' => index != 0,
+        _ => false,
+    }) && !value.is_empty()
+}
+
 pub fn resolve_dingtalk_credentials(
-    config: &DeliveryConfig,
+    config: &DeliveryRoute,
 ) -> Result<(String, Option<String>), ConfigError> {
     let token = required_environment_value(&config.token_env, std::env::var(&config.token_env))?;
-    let secret = if config.signed {
-        optional_environment_value(&config.secret_env, std::env::var(&config.secret_env))?
-    } else {
-        None
-    };
+    let secret = config
+        .secret_env
+        .as_deref()
+        .map(|name| required_environment_value(name, std::env::var(name)))
+        .transpose()?;
     Ok((token, secret))
 }
 
@@ -1058,19 +1138,6 @@ fn required_environment_value(
     }
 }
 
-fn optional_environment_value(
-    name: &str,
-    value: Result<String, std::env::VarError>,
-) -> Result<Option<String>, ConfigError> {
-    match value {
-        Ok(value) if !value.is_empty() => Ok(Some(value)),
-        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::Invalid(format!(
-            "environment {name} is not valid Unicode"
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod credential_tests {
     use super::*;
@@ -1086,18 +1153,12 @@ mod credential_tests {
     }
 
     #[test]
-    fn dingtalk_secret_is_optional_for_ip_whitelist_mode() {
+    fn configured_dingtalk_secret_is_required() {
         assert_eq!(
-            optional_environment_value("SECRET", Ok("secret".into())).unwrap(),
-            Some("secret".into())
+            required_environment_value("SECRET", Ok("secret".into())).unwrap(),
+            "secret"
         );
-        assert_eq!(
-            optional_environment_value("SECRET", Ok(String::new())).unwrap(),
-            None
-        );
-        assert_eq!(
-            optional_environment_value("SECRET", Err(std::env::VarError::NotPresent)).unwrap(),
-            None
-        );
+        assert!(required_environment_value("SECRET", Ok(String::new())).is_err());
+        assert!(required_environment_value("SECRET", Err(std::env::VarError::NotPresent)).is_err());
     }
 }

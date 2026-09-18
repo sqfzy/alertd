@@ -3,6 +3,10 @@ use sha2::{Digest, Sha256};
 
 fn valid() -> &'static str {
     r#"
+[delivery]
+[[delivery.routes]]
+name = "default"
+token_env = "TEST_TOKEN"
 [runtime]
 state_dir = "/tmp/alertd"
 [[checks]]
@@ -41,17 +45,76 @@ fn accepts_explicitly_disabled_runtime_switch() {
 }
 
 #[test]
+fn validates_delivery_routes_and_external_observation_contract() {
+    let text = r#"
+[runtime]
+interval = "10s"
+
+[delivery]
+timeout = "3s"
+queue_capacity = 16
+queue_warn_pct = 80
+failure_report_after = 3
+retry_initial = "1s"
+retry_max = "5s"
+
+[[delivery.routes]]
+name = "default"
+token_env = "ALERTD_DINGTALK_TOKEN"
+
+[[delivery.routes]]
+name = "live-mm"
+token_env = "LIVE_MM_DINGTALK_TOKEN"
+at_all_on_critical = true
+
+[[checks]]
+name = "external"
+type = "observation_file"
+path = "/run/live-mm-observer/health.json"
+stale_after = "30s"
+forward_report = true
+delivery_route = "live-mm"
+"#;
+    let config: Config = toml::from_str(text).unwrap();
+    config::validate_config(&config).unwrap();
+
+    for invalid in [
+        text.replace("name = \"default\"", "name = \"DEFAULT\""),
+        text.replace("name = \"live-mm\"", "name = \"default\""),
+        text.replace(
+            "delivery_route = \"live-mm\"",
+            "delivery_route = \"missing\"",
+        ),
+        text.replace(
+            "token_env = \"LIVE_MM_DINGTALK_TOKEN\"",
+            "token_env = \"1BAD\"",
+        ),
+        text.replace("/run/live-mm-observer/health.json", "relative.json"),
+    ] {
+        let config: Config = toml::from_str(&invalid).unwrap();
+        assert!(
+            config::validate_config(&config).is_err(),
+            "accepted: {invalid}"
+        );
+    }
+}
+
+#[test]
 fn complete_example_matches_strict_schema() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/alertd.toml.example");
 
     let config = config::load_config(&path).expect("complete example must remain valid");
 
-    assert_eq!(config.checks.len(), 14);
+    assert_eq!(config.checks.len(), 16);
 }
 
 #[test]
 fn validates_live_mm_entry_contract() {
     let text = r#"
+[delivery]
+[[delivery.routes]]
+name = "default"
+token_env = "TEST_TOKEN"
 [runtime]
 interval = "5s"
 
@@ -132,6 +195,10 @@ fn validates_optional_runtime_ip() {
 #[test]
 fn validates_systemd_and_latest_file_contracts() {
     let text = r#"
+[delivery]
+[[delivery.routes]]
+name = "default"
+token_env = "TEST_TOKEN"
 [runtime]
 interval = "10s"
 
@@ -164,6 +231,10 @@ minimum_size_bytes = 384
 #[test]
 fn validates_optional_journal_filters() {
     let text = r#"
+[delivery]
+[[delivery.routes]]
+name = "default"
+token_env = "TEST_TOKEN"
 [[checks]]
 name = "journal"
 type = "journal"
@@ -187,6 +258,10 @@ rules = [{ contains = "ERROR", severity = "critical" }]
 #[test]
 fn validates_metrics_file_contract() {
     let text = r#"
+[delivery]
+[[delivery.routes]]
+name = "default"
+token_env = "TEST_TOKEN"
 [runtime]
 interval = "10s"
 
@@ -240,6 +315,10 @@ metrics = [
 #[test]
 fn validates_metric_lower_and_upper_ranges_for_both_sources() {
     let text = r#"
+[delivery]
+[[delivery.routes]]
+name = "default"
+token_env = "TEST_TOKEN"
 [[checks]]
 name = "file-ranges"
 type = "metrics_file"
@@ -300,6 +379,10 @@ metrics = [
 #[test]
 fn validates_metrics_shm_contract() {
     let text = r#"
+[delivery]
+[[delivery.routes]]
+name = "default"
+token_env = "TEST_TOKEN"
 [[checks]]
 name = "latency-shm"
 type = "metrics_shm"
@@ -393,6 +476,10 @@ recover_for = "60s"
 [delivery]
 queue_warn_pct = 80
 failure_report_after = 3
+
+[[delivery.routes]]
+name = "default"
+token_env = "TEST_TOKEN"
 
 [[checks]]
 name = "cpu"

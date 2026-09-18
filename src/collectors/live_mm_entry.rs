@@ -762,6 +762,7 @@ mod tests {
             pending_for: None,
             recover_for: None,
             runbook: None,
+            delivery_route: "default".into(),
             kind: CheckKind::LiveMmEntry {
                 instances: instances(),
                 stale_after: "20s".into(),

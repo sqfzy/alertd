@@ -16,11 +16,13 @@ Collector → Observation → Alarm Engine → AlertEvent → Durable Queue → 
 - `Observation` 是一次采样结果；普通 check 表示健康状态，journal check 表示一次或一批日志事件。
 - Alarm Engine 读取 POD 状态并产生可选 `AlertEvent`。
 - 报告层把事件格式化为易读文本，持久队列接受后才算完成本地交付。
-- 钉钉 worker 独立重试，不阻塞采集循环。
+- 每个 delivery route 有独立钉钉 worker、FIFO 和退避，不阻塞采集循环或其他 route。
 
 `metrics_file` 与 `metrics_shm` 共用固定的上下限判断和展示逻辑，但保留各自明确的数据边界：前者读取生产者原子替换的 JSON 快照，适合跨字段一致的聚合结果；后者只从一次打开的 SHM 文件描述符定点读取 ABI 与配置字段，适合低成本单值采样。两者都不保存历史或自行计算聚合窗口，也不解析表达式、多段区间或跨指标规则。
 
 SHM 数值读取不引入业务 ABI parser 或 seqlock。生产者负责用自然对齐的原子写更新每个字段；单轮多个字段可能来自不同写入时刻。路径在读取期间被替换时，已打开文件描述符保证本轮不会混合两个 inode。ABI mismatch 会跳过后续数值读取并作为对象异常进入统一状态机；权限、短读、越界或非法浮点则属于 collector failure。
+
+`observation_file` 是外部业务观察器与 alertd 的固定边界。生产者以临时文件、文件 `fsync`、原子 rename 和目录 `fsync` 发布 64 KiB 以内 JSON；alertd 用打开后的文件元数据判断 mtime，不读取业务 SHM、原始 dump 或业务日志。快照 `status` 直接映射 Observation，`details` 只作为可读上下文。可选 report 已由观察器完成统计与排版；只有其 ID 成功入队才写进 `CheckState`，因此允许重复但不静默跳过。
 
 主要实现位于 `src/collectors/`、`src/model.rs`、`src/alarm.rs`、`src/report.rs`、`src/delivery/queue.rs` 和 `src/delivery/dingtalk.rs`。
 
@@ -57,11 +59,11 @@ journal check 是事件型，不把“本轮没有新日志”解释为恢复：
 
 ## 持久队列
 
-队列文件先写临时文件并 `fsync`，再原子 rename 并同步目录。只有钉钉确认成功后才删除消息。
+队列文件先写临时文件并 `fsync`，再原子 rename 并同步目录。消息入队时冻结 `delivery_route`；只有该 route 的钉钉确认成功后才删除消息。
 
 因此交付语义是“允许重复，不静默丢失”：网络模糊失败或进程重启可能重复发送，但一条已被队列接受的消息不会仅因进程退出而消失。损坏文件移入 `spool/quarantine/`，避免阻塞其余消息。
 
-钉钉 access token 始终必需。secret 环境变量存在且非空时 worker 生成时间戳和签名；缺失或为空时使用钉钉 IP 白名单模式，仅发送 access token。两种模式共用相同的持久队列和重试语义。
+每个 route 的钉钉 access token 始终必需。route 配置 `secret_env` 时 worker 生成时间戳和签名；省略 `secret_env` 时使用钉钉 IP 白名单模式，仅发送 access token。各 route 共用总容量，但 spool 子目录、FIFO、连续失败计数和指数退避彼此独立；某 route 连续失败或恢复时，通过 `default` route 发送 alertd 自监控消息。
 
 普通 check 消息最多占 `queue_capacity - 1` 个槽。最后一个槽只供内部事件使用，使“队列接近或已满”等自监控在业务消息拥塞时仍有机会持久化。
 

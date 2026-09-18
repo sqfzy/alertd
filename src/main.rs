@@ -17,6 +17,8 @@ struct Cli {
     dry_run: bool,
     #[arg(long, action = ArgAction::SetTrue)]
     send_test: bool,
+    #[arg(long, requires = "send_test", default_value = "default")]
+    delivery_route: String,
     #[arg(long)]
     log_level: Option<String>,
 }
@@ -41,6 +43,7 @@ fn main() {
             &loaded_config.config,
             loaded_config.source_sha256,
             cli.dry_run,
+            &cli.delivery_route,
         ));
         return;
     }

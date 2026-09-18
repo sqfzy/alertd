@@ -28,10 +28,6 @@ daily_report_at = "02:00"
 collect_fail_after_n = 3
 
 [delivery]
-# 值是环境变量名，token 必填且不写入 TOML。
-token_env = "ALERTD_DINGTALK_TOKEN"
-# secret 环境变量存在且非空时启用加签；缺失或为空时使用 IP 白名单模式。
-secret_env = "ALERTD_DINGTALK_SECRET"
 # HTTP 超时：200ms..=30s。
 timeout = "3s"
 # 持久队列容量：16..=65536；最后一个槽保留给内部事件。
@@ -42,12 +38,25 @@ failure_report_after = 3
 # 指数退避：initial 1s..=1h，max 必须不小于 initial 且不超过 24h。
 retry_initial = "5s"
 retry_max = "5m"
-# CRITICAL 是否 @所有人。
+
+# 至少一个 route，必须包含保留名 default。token/secret 的值均为环境变量名。
+# secret_env 可省略，以使用钉钉 IP 白名单模式；每个 route 独立顺序投递与退避。
+[[delivery.routes]]
+name = "default"
+token_env = "ALERTD_DINGTALK_TOKEN"
+secret_env = "ALERTD_DINGTALK_SECRET"
+at_all_on_critical = false
+
+[[delivery.routes]]
+name = "live-mm"
+token_env = "LIVE_MM_DINGTALK_TOKEN"
+# secret_env = "LIVE_MM_DINGTALK_SECRET"
 at_all_on_critical = false
 
 # 所有 check 的 name 全局唯一（1..=128 字节）。enabled 默认 true，
 # severity 默认 critical；pending_for/recover_for 可覆盖全局 0s..=24h，
 # runbook 可选且必须为 HTTP(S) URL。
+# delivery_route 默认 default；日报与 alertd 自监控始终走 default。
 [[checks]]
 name = "bybit-market"
 type = "process"
@@ -64,6 +73,24 @@ instances = [
   { name = "live_mm2", unit = "live-mm-v0@account8.service" },
 ]
 stale_after = "30s"
+
+[[checks]]
+name = "live-mm-health"
+type = "observation_file"
+# 外部观察器以临时文件 + fsync + 原子 rename 写入 JSON 快照。
+path = "/run/live-mm-observer/health.json"
+stale_after = "30s"
+delivery_route = "live-mm"
+
+[[checks]]
+name = "live-mm-statistics"
+type = "observation_file"
+path = "/run/live-mm-observer/statistics.json"
+stale_after = "90s"
+# 观察器已完成正文排版；同一个 report id 只会成功入队一次。
+forward_report = true
+pending_for = "24h"
+delivery_route = "live-mm"
 
 [[checks]]
 name = "bybit-book"

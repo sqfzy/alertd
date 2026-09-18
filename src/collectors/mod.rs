@@ -7,6 +7,7 @@ mod metrics;
 pub mod metrics_file;
 pub mod metrics_shm;
 pub mod network;
+pub mod observation_file;
 pub mod process;
 pub mod shm;
 pub mod system_tuning;
@@ -121,6 +122,11 @@ pub fn collect(
             abi_hash,
             metrics,
         } => metrics_shm::collect(check, path, abi_hash.as_ref(), metrics, context),
+        CheckKind::ObservationFile {
+            path,
+            stale_after,
+            forward_report,
+        } => observation_file::collect(check, path, stale_after, *forward_report),
         CheckKind::Disk {
             mount,
             warn_used_pct,

@@ -14,21 +14,24 @@ install -o root -g root -m 0600 deploy/alertd.env.example /etc/alertd/alertd.env
 install -o root -g root -m 0644 deploy/alertd.service /etc/systemd/system/alertd.service
 ```
 
-编辑环境文件，只保存配置所引用的凭据，不把 token 或 secret 写入 TOML。token 始终必填；加签机器人还需提供 secret，IP 白名单机器人应省略 secret：
+编辑环境文件，只保存每个 `delivery.routes` 所引用的凭据，不把 token 或 secret 写入 TOML。token 始终必填；route 配置了 `secret_env` 时该 secret 也必填，IP 白名单机器人应直接省略 `secret_env`：
 
 ```sh
 ALERTD_DINGTALK_TOKEN=replace-me
-# ALERTD_DINGTALK_SECRET=replace-me
+ALERTD_DINGTALK_SECRET=replace-me
+LIVE_MM_DINGTALK_TOKEN=replace-me
+# LIVE_MM_DINGTALK_SECRET=replace-me
 ```
 
-`delivery.secret_env` 继续指定可选 secret 的环境变量名：该变量存在且非空时请求携带 `timestamp` 和 `sign`；缺失或为空时只携带 access token。启动 INFO 日志中的 `signing_enabled` 可用于确认实际模式。
+`delivery.routes[].secret_env` 指定加签 secret 的环境变量名；该字段存在时请求携带 `timestamp` 和 `sign`，字段省略时只携带 access token。启动 INFO 日志的 `route` 与 `signing_enabled` 可用于确认实际模式。
 
 启动前执行：
 
 ```sh
 alertd --config /etc/alertd/alertd.toml --check-config
 alertd --config /etc/alertd/alertd.toml --dry-run
-alertd --config /etc/alertd/alertd.toml --send-test
+alertd --config /etc/alertd/alertd.toml --send-test --delivery-route default
+alertd --config /etc/alertd/alertd.toml --send-test --delivery-route live-mm
 systemctl daemon-reload
 systemctl enable --now alertd
 systemctl status alertd
@@ -98,7 +101,7 @@ journalctl -u alertd -n 50 --no-pager
 | 路径 | 用途 | 排障原则 |
 |---|---|---|
 | `state.json` | check 状态、journal cursor、日报、开关通知与生命周期标记 | 不在线编辑；先停止服务并备份再处理 |
-| `spool/*.json` | 待投递消息 | 网络恢复后自动重试；不要批量删除 |
+| `spool/<route>/*.json` | route 专属待投递消息 | 网络恢复后自动重试；不要批量删除或移动到其他 route |
 | `spool/quarantine/` | 无法解析的队列文件 | 保留现场并结合 alertd ERROR 分析 |
 
 旧版本遗留的 `maintenance.json` 已不再读取，也不会影响 `runtime.enabled`；确认不再回滚到旧版本后可人工归档或删除。
@@ -116,12 +119,13 @@ systemctl show alertd -p ActiveState -p SubState -p NRestarts -p WatchdogTimesta
 1. 运行 `--check-config`，确认严格 schema 和范围校验通过。
 2. 查看 alertd unit 的 ERROR/WARN，确认不是 collector 命令超时或权限问题。
 3. 查看 `runtime.enabled`、`systemctl status` 和最近一次热加载日志，确认监控没有被关闭。
-4. 统计 `spool/*.json`，确认是否为钉钉超时、429/5xx 或队列已满。
+4. 分 route 统计 `spool/*/*.json`，确认是否为钉钉超时、429/5xx 或队列已满；一个失败 route 不应阻塞其他 route。
 5. 检查 `spool/quarantine/`；隔离文件不会自动重新投递。
 6. 对 journal check，用源服务的 `journalctl -u <unit>` 核对原文、过滤子串和 cursor 行为。
 7. 对主机 check，直接检查对应 `/proc`、`/sys`、挂载点、`systemctl show` 或 `chronyc -c tracking`。
 8. 对 `metrics_file`，检查文件大小、mtime、JSON 顶层对象和配置 key；生产者应以原子 rename 更新。
 9. 对 `metrics_shm`，先核对 `/dev/shm/<name>` 的权限与大小，再按配置 offset、类型、字节序和可选 ABI 原始字节检查生产者布局。ABI 不匹配是对象异常；短读、越界和非法浮点会进入采集盲区路径。
+10. 对 `observation_file`，检查文件权限、大小、mtime 和 JSON 的 `schema_version`、`observed_at`、`status`；源观察器必须原子发布快照。report 未送达时先检查该 check 所属 route 的 spool。
 
 ## 安全停止、升级与回滚
 

@@ -15,15 +15,18 @@ daily_report_at = "off"
 collect_fail_after_n = 3
 
 [delivery]
-token_env = "ALERTD_DINGTALK_TOKEN"
-secret_env = "ALERTD_DINGTALK_SECRET"
 timeout = "3s"
 queue_capacity = 128
 retry_initial = "5s"
 retry_max = "1m"
-at_all_on_critical = false
 queue_warn_pct = 80
 failure_report_after = 3
+
+[[delivery.routes]]
+name = "default"
+token_env = "ALERTD_DINGTALK_TOKEN"
+secret_env = "ALERTD_DINGTALK_SECRET"
+at_all_on_critical = false
 
 [[checks]]
 name = "alertd-process"
