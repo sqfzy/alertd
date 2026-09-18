@@ -636,8 +636,12 @@ fn statistics_report_body(
     let mut current_instance: Option<&str> = None;
     let mut output = Vec::new();
     for line in body.lines() {
-        if counters.contains_key(line) {
-            current_instance = Some(line);
+        let instance_name = line
+            .strip_prefix("**")
+            .and_then(|value| value.strip_suffix("**"))
+            .unwrap_or(line);
+        if counters.contains_key(instance_name) {
+            current_instance = Some(instance_name);
             output.push(line.to_owned());
             continue;
         }
@@ -986,7 +990,7 @@ critical_available_pct = 10
             fills_total: 80,
             place_fail_total: 2,
         };
-        let body = "live_mm2\n\n近30s：open 1｜close 2｜fills 3｜fail 0";
+        let body = "**live_mm2**\n\n近30s：open 1｜close 2｜fills 3｜fail 0";
         let (rendered, _) = statistics_report_body(
             body,
             Duration::from_secs(600),

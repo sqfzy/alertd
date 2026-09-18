@@ -519,23 +519,25 @@ fn format_statistics_report(
             .parse::<i128>()
             .unwrap_or_default();
     }
+    output.push("**总体**".to_owned());
     output.push(format!(
-        "总体：{available}/{}盘有统计｜入口开启 {entries}｜风险盘 {risks}",
-        instances.len()
+        "统计：{available}/{}｜入口：{entries}/{}｜风险：{risks}",
+        instances.len(),
+        instances.len(),
     ));
     output.push(if totals_valid {
         format!(
-            "总权益：{:.2} U｜gross：{:.2} U｜net：{:.2} U",
+            "资产：权益 {:.2} U｜gross {:.2} U｜net {:.2} U",
             total_equity as f64 / 100_000_000.0,
             total_gross as f64 / 100_000_000.0,
             total_net as f64 / 100_000_000.0,
         )
     } else {
-        "总权益 / gross / net：unknown（存在缺失或无法定价样本）".into()
+        "资产：unknown（存在缺失或无法定价样本）".into()
     });
     for instance in instances {
         let Some(snapshot) = statistics.get(instance.unit.as_str()) else {
-            output.push(format!("{}: statistics unavailable", instance.name));
+            output.push(format!("**{}**\n\n状态：统计不可用", instance.name));
             continue;
         };
         let fields = &snapshot.fields;
@@ -545,7 +547,7 @@ fn format_statistics_report(
             .max(0);
         let window = statistics_window(fields);
         output.push(format!(
-            "{}\n\n入口：{}｜风险：0x{}｜样本年龄：{}s\n\n权益：{}｜gross：{}｜net：{}\n\n活动：open {}｜maker {}｜taker {}｜episodes {}\n\n近{}：open {}｜close {}｜fills {}｜fail {}",
+            "**{}**\n\n状态：入口 {}｜风险 0x{}｜样本 {}s\n\n账户：权益 {}｜gross {}｜net {}\n\n活动订单：开仓 {}｜Maker平仓 {}｜Taker平仓 {}｜Episodes {}\n\n近{}：open {}｜close {}｜fills {}｜fail {}",
             instance.name,
             if number(fields, "entries_enabled") == "1" { "开" } else { "关" },
             number(fields, "runtime_risk_mask"),
@@ -560,18 +562,18 @@ fn format_statistics_report(
             number(fields, "fills_delta"), number(fields, "place_fail_delta"),
         ));
         if !snapshot.symbols.is_empty() {
-            output.push("非零/活动币种：".into());
+            output.push(format!("活动币种（{}）：", snapshot.symbols.len()));
             for symbol in &snapshot.symbols {
                 output.push(format!(
-                    "- {} position={} exposure={} account_age={}ms active={}/{}/{} episodes={}",
-                    number(symbol, "coin"),
+                    "- {}｜仓位 {}｜敞口 {}\n  活动订单：开仓 {}｜Maker平仓 {}｜Taker平仓 {}\n  Episodes：{}｜账户数据年龄：{}ms",
+                    number(symbol, "coin").to_uppercase(),
                     fixed_1e8(symbol, "position_1e8"),
                     usdt(symbol, "priced", "signed_exposure_1e8"),
-                    number(symbol, "account_age_ms"),
                     number(symbol, "active_open"),
                     number(symbol, "active_maker"),
                     number(symbol, "active_taker"),
                     number(symbol, "active_episodes"),
+                    number(symbol, "account_age_ms"),
                 ));
             }
         }
@@ -1040,9 +1042,12 @@ mod tests {
             crate::model::ObservationStatus::Healthy
         ));
         let report = &observation.details["策略统计"];
-        assert!(report.contains("总体：4/4盘有统计｜入口开启 4｜风险盘 0"));
+        assert!(report.contains("**总体**\n\n统计：4/4｜入口：4/4｜风险：0"));
+        assert!(report.contains("**live_mm1**\n\n状态：入口 开｜风险 0x00000000｜样本 3s"));
         assert!(report.contains("近30.241s：open 1｜close 0｜fills 0｜fail 0"));
-        assert!(report.contains("APE position=1 exposure=1.25 U"));
+        assert!(report.contains(
+            "活动币种（1）：\n\n- APE｜仓位 1｜敞口 1.25 U\n  活动订单：开仓 1｜Maker平仓 0｜Taker平仓 0\n  Episodes：1｜账户数据年龄：3ms"
+        ));
         assert!(observation.details["_statistics_counters"].contains("\"open_total\":10"));
     }
 
