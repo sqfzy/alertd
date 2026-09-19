@@ -129,6 +129,37 @@ fn delivery_routes_can_differ_by_observation_severity() {
 }
 
 #[test]
+fn validates_compact_notification_presentation() {
+    let text = valid().replace(
+        "mount = \"/\"",
+        "mount = \"/\"\nwarn_notification_label = \"P2 · live_mm 风控\"\ncritical_notification_label = \"P1 · live_mm 风控\"\nnotification_detail_keys = [\"监控摘要\"]",
+    );
+    let config: Config = toml::from_str(&text).unwrap();
+    config::validate_config(&config).unwrap();
+    let check = &config.checks[0];
+
+    assert_eq!(
+        check.notification_label_for(alertd::model::Severity::Warn),
+        Some("P2 · live_mm 风控")
+    );
+    assert_eq!(check.notification_detail_keys, ["监控摘要"]);
+
+    for invalid in [
+        text.replace(
+            "notification_detail_keys = [\"监控摘要\"]",
+            "notification_detail_keys = [\"监控摘要\", \"监控摘要\"]",
+        ),
+        text.replace("P2 · live_mm 风控", ""),
+    ] {
+        let config: Config = toml::from_str(&invalid).unwrap();
+        assert!(
+            config::validate_config(&config).is_err(),
+            "accepted: {invalid}"
+        );
+    }
+}
+
+#[test]
 fn complete_example_matches_strict_schema() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/alertd.toml.example");
 

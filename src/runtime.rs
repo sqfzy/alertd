@@ -459,7 +459,12 @@ fn process_observation(
     let Some(event) = alarm::evaluate(state, &observation, &policy, check.runbook.clone()) else {
         return true;
     };
-    let text = report::format_alert(report_context, &event);
+    let text = report::format_alert_with_notification(
+        report_context,
+        &event,
+        check.notification_label_for(event.severity),
+        &check.notification_detail_keys,
+    );
     let route = check.delivery_route_for(event.severity);
     let accepted = enqueue_check(queue, &check.name, route, event.severity, text, dry_run);
     if !accepted {

@@ -11,7 +11,7 @@
 | 输入 | 外部健康快照 | 原子 JSON 文件 | 观察器从 live_mm 结构化日志和 systemd 状态归约出的当前状态 |
 | 输入 | `stale_after` | duration | 快照 `observed_at` 或文件元数据超过门限等价于状态缺失 |
 | 成功输出 | Healthy | observation | 四类 mask 均为零且风险快照存在 |
-| 失败输出 | P2 / WARN | observation | 币级风险或账户/币级额度保护非零；仅阻止受影响范围的新增开仓，退出链路保持可用 |
+| 失败输出 | P2 / WARN | observation | 币级风险或账户/币级额度保护非零 |
 | 失败输出 | P1 / CRITICAL | observation | 全局风险、入口异常、风险快照缺失/损坏或服务停止 |
 
 ## 不变量与副作用边界
@@ -20,7 +20,7 @@
 2. 四类 mask 分开展示，不互相折叠；受影响 symbol bitset 必须保留。
 3. alertd 只观测和通知，不开启入口、不清除风险、不重启服务。
 4. `runtime_risk_mask` 非零固定为 P1；`symbol_risk_combined_mask`、`order_guard_account_mask` 与 `order_guard_symbol_combined_mask` 非零固定为 P2。没有按持续时间、币种数量或影响比例自动升级的规则。
-5. order guard 非零消息必须保留 guard 字段，使值班人员能识别“仅暂停 Open”的语义。
+5. 通知只展示入口、服务、风险 mask、受影响位图及样本年龄等事实；不解释业务影响或给出处置建议。
 6. P1 降为 P2 时，一级 route 先收到恢复，二级 route 对持续的 P2 风险重新执行自己的防抖；全零恢复仍由既有 `recover_for` 控制。
 
 ## 主流程

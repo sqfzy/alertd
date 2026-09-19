@@ -65,6 +65,34 @@ fn multiline_detail_uses_markdown_hard_breaks() {
 }
 
 #[test]
+fn configured_notification_keeps_only_selected_details() {
+    let event = AlertEvent {
+        check_name: "observation".into(),
+        severity: Severity::Warn,
+        transition: Transition::Firing,
+        started_at: Utc.with_ymd_and_hms(2026, 9, 19, 12, 0, 0).unwrap(),
+        observed_at: Utc.with_ymd_and_hms(2026, 9, 19, 12, 0, 0).unwrap(),
+        summary: "存在二级局部风险或采集降级".into(),
+        details: BTreeMap::from([
+            ("监控摘要".into(), "实例：live_mm4｜服务：active".into()),
+            ("live_mm4".into(), "原始风险：0x00000008".into()),
+        ]),
+        runbook: None,
+    };
+
+    let text = report::format_alert_with_notification(
+        context(None),
+        &event,
+        Some("P2 · live_mm 风控"),
+        &["监控摘要".into()],
+    );
+
+    assert!(text.starts_with("🟡 **P2 · live_mm 风控 · 告警**"));
+    assert!(text.contains("**监控摘要：** 实例：live_mm4｜服务：active"));
+    assert!(!text.contains("原始风险"));
+}
+
+#[test]
 fn external_report_body_uses_markdown_hard_breaks() {
     let text = report::format_external_report(
         context(Some("52.221.32.231")),

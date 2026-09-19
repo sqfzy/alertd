@@ -296,6 +296,10 @@ pub struct CheckConfig {
     pub delivery_route: String,
     pub warn_delivery_route: Option<String>,
     pub critical_delivery_route: Option<String>,
+    pub warn_notification_label: Option<String>,
+    pub critical_notification_label: Option<String>,
+    #[serde(default)]
+    pub notification_detail_keys: Vec<String>,
     #[serde(flatten)]
     pub kind: CheckKind,
 }
@@ -316,6 +320,14 @@ impl CheckConfig {
                 .as_deref()
                 .unwrap_or(&self.delivery_route),
             Severity::Ok => &self.delivery_route,
+        }
+    }
+
+    pub fn notification_label_for(&self, severity: Severity) -> Option<&str> {
+        match severity {
+            Severity::Warn => self.warn_notification_label.as_deref(),
+            Severity::Critical => self.critical_notification_label.as_deref(),
+            Severity::Ok => None,
         }
     }
 }
@@ -612,6 +624,25 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
                     check.name, route
                 )));
             }
+        }
+        for label in [
+            check.warn_notification_label.as_deref(),
+            check.critical_notification_label.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            validate_notification_text("checks notification label", label)?;
+        }
+        let mut notification_keys = HashSet::new();
+        for key in &check.notification_detail_keys {
+            if !notification_keys.insert(key) {
+                return Err(ConfigError::Invalid(format!(
+                    "check {} notification detail key {:?} is duplicated",
+                    check.name, key
+                )));
+            }
+            validate_notification_text("checks notification detail key", key)?;
         }
         if let Some(value) = &check.pending_for {
             duration_range(
@@ -1020,6 +1051,15 @@ fn valid_posix_shm_name(path: &str) -> bool {
         && path.starts_with('/')
         && !path[1..].contains('/')
         && !path.contains('\0')
+}
+
+fn validate_notification_text(field: &str, value: &str) -> Result<(), ConfigError> {
+    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        return Err(ConfigError::Invalid(format!(
+            "{field} must contain 1..=128 non-control bytes"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_delivery_routes(routes: &[DeliveryRoute]) -> Result<(), ConfigError> {

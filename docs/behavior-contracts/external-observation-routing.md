@@ -10,6 +10,7 @@
 |---|---|---|---|
 | 输入 | observation 快照 | 最大 64 KiB JSON 文件 | 原子替换；状态为 `ok`、`warn` 或 `critical` |
 | 输入 | delivery route | `default` 或已配置名称 | `delivery_route` 是报告与未分级告警的回退目标；可选 WARN/CRITICAL route 分别接收对应等级的告警与恢复 |
+| 输入 | notification presentation | 可选标题和详情 key 列表 | 仅控制告警文本标题及显示哪些 producer detail；不改变快照、状态机或 route |
 | 成功输出 | AlertEvent | 既有告警事件 | 快照状态进入既有状态机 |
 | 成功输出 | 专项报告 | 持久队列消息 | 新 report ID 仅在成功入队后确认 |
 | 降级输出 | stale/missing | configured severity | 快照不可用属于被监控对象异常 |
@@ -20,6 +21,8 @@
 - 同一 spool 共享容量，但每个 route 独立 FIFO、客户端与退避。
 - route 在消息入队时写入队列文件；热加载不得重定向已入队消息。
 - `warn_delivery_route` 与 `critical_delivery_route` 只影响告警生命周期；`forward_report` 始终走 `delivery_route`。
+- `warn_notification_label`、`critical_notification_label` 可替换对应严重级别的通知标题；未配置时保留 `WARN`、`CRITICAL`。
+- 空 `notification_detail_keys` 保留既有全部详情；非空时按配置顺序只显示存在且非内部的 detail key。
 - P1/CRITICAL 降为 P2/WARN 时，先向原 CRITICAL route 发送恢复，再从新的 WARN 观察重新开始防抖；alertd 不把它伪装成全量恢复。
 - 内部事件和日报固定走 `default`；非 default route 故障经 `default` 报告。
 - 旧队列消息没有 route 时视为 `default`，不得丢弃或改投其他 route。

@@ -45,6 +45,9 @@ path = "/run/live-mm-observer/health.json"
 stale_after = "30s"
 warn_delivery_route = "live-mm-p2"
 critical_delivery_route = "live-mm-p1"
+warn_notification_label = "P2 · live_mm 风控"
+critical_notification_label = "P1 · live_mm 风控"
+notification_detail_keys = ["监控摘要"]
 
 [[checks]]
 name = "live-mm-statistics"

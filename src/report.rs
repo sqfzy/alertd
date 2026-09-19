@@ -17,6 +17,15 @@ pub struct ReportContext<'a> {
 }
 
 pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
+    format_alert_with_notification(context, event, None, &[])
+}
+
+pub fn format_alert_with_notification(
+    context: ReportContext<'_>,
+    event: &AlertEvent,
+    notification_label: Option<&str>,
+    notification_detail_keys: &[String],
+) -> String {
     if event.transition == Transition::Event {
         return format_journal_event(context, event);
     }
@@ -26,7 +35,8 @@ pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
         Transition::Resolved => ("🟢", "恢复"),
         Transition::Event => unreachable!("journal events use their dedicated formatter"),
     };
-    let mut text = format!("{icon} **{} · {transition}**", event.severity.label());
+    let label = notification_label.unwrap_or(event.severity.label());
+    let mut text = format!("{icon} **{label} · {transition}**");
     push_field(&mut text, "主机", context.host);
     if let Some(ip) = context.ip {
         push_field(&mut text, "IP", ip);
@@ -35,7 +45,7 @@ pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
     push_field(&mut text, "检查", &event.check_name);
     push_field(&mut text, "状态", &event.summary);
     push_field(&mut text, "异常开始", &format_beijing(event.started_at));
-    for (key, value) in &event.details {
+    for (key, value) in notification_details(event, notification_detail_keys) {
         if !key.starts_with('_') && !value.is_empty() {
             push_field(&mut text, key, value);
         }
@@ -52,6 +62,19 @@ pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
         push_field(&mut text, "处理", runbook);
     }
     text
+}
+
+fn notification_details<'a>(
+    event: &'a AlertEvent,
+    notification_detail_keys: &'a [String],
+) -> Vec<(&'a String, &'a String)> {
+    if notification_detail_keys.is_empty() {
+        return event.details.iter().collect();
+    }
+    notification_detail_keys
+        .iter()
+        .filter_map(|key| event.details.get_key_value(key))
+        .collect()
 }
 
 fn format_journal_event(context: ReportContext<'_>, event: &AlertEvent) -> String {
