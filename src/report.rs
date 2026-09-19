@@ -365,7 +365,11 @@ fn unavailable_reason(observation: &Observation) -> String {
 }
 
 fn push_field(text: &mut String, label: &str, value: &str) {
-    text.push_str(&format!("\n\n**{label}：** {value}"));
+    text.push_str(&format!("\n\n**{label}：** {}", markdown_value(value)));
+}
+
+fn markdown_value(value: &str) -> String {
+    value.replace('\n', "  \n")
 }
 
 fn push_quote_field(text: &mut String, label: &str, value: &str) {

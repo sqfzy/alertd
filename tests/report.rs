@@ -47,6 +47,24 @@ fn alert_fields_are_separate_markdown_paragraphs() {
 }
 
 #[test]
+fn multiline_detail_uses_markdown_hard_breaks() {
+    let event = AlertEvent {
+        check_name: "observation".into(),
+        severity: Severity::Critical,
+        transition: Transition::Firing,
+        started_at: Utc.with_ymd_and_hms(2026, 9, 19, 12, 0, 0).unwrap(),
+        observed_at: Utc.with_ymd_and_hms(2026, 9, 19, 12, 0, 0).unwrap(),
+        summary: "observation is unhealthy".into(),
+        details: BTreeMap::from([("live_mm4".into(), "入口：开\n全局风险：0x0".into())]),
+        runbook: None,
+    };
+
+    let text = report::format_alert(context(None), &event);
+
+    assert!(text.contains("**live_mm4：** 入口：开  \n全局风险：0x0"));
+}
+
+#[test]
 fn alert_hides_internal_detail_fields() {
     let event = AlertEvent {
         check_name: "live-mm-entry".into(),
@@ -222,7 +240,7 @@ metrics = [{ key = "value", offset = 0, value_type = "u64" }]
     );
     assert!(text.contains("**每核 CPU：** cpu0 10% · cpu1 30%"));
     assert!(text.contains(
-        "**业务指标：** latency: latency_p99_us=72 · samples=180000\nunavailable-metrics: 不可用"
+        "**业务指标：** latency: latency_p99_us=72 · samples=180000  \nunavailable-metrics: 不可用"
     ));
     assert!(text.contains("**日志 24h：** WARN 3，ERROR 1"));
     assert!(text.contains("**投递队列：** 待发送 2 条（default 1 条，live-mm 1 条）"));
