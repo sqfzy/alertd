@@ -311,7 +311,7 @@ pub fn format_external_report(context: ReportContext<'_>, title: &str, body: &st
         push_field(&mut text, "IP", ip);
     }
     text.push_str("\n\n");
-    text.push_str(body);
+    text.push_str(&markdown_value(body));
     text
 }
 

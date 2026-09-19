@@ -65,6 +65,17 @@ fn multiline_detail_uses_markdown_hard_breaks() {
 }
 
 #[test]
+fn external_report_body_uses_markdown_hard_breaks() {
+    let text = report::format_external_report(
+        context(Some("52.221.32.231")),
+        "LIVE_MM · 10分钟策略统计",
+        "live_mm4\n权益 100.00 U\n活动 open 1",
+    );
+
+    assert!(text.contains("live_mm4  \n权益 100.00 U  \n活动 open 1"));
+}
+
+#[test]
 fn alert_hides_internal_detail_fields() {
     let event = AlertEvent {
         check_name: "live-mm-entry".into(),
