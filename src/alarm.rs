@@ -47,10 +47,53 @@ pub fn evaluate(
     }
     match observation.status {
         ObservationStatus::Healthy => resolve(state, observation, policy, runbook),
+        ObservationStatus::Unhealthy(severity)
+            if state.firing_since.is_some() && severity < state.severity =>
+        {
+            resolve_lower_severity(state, observation, severity, policy, runbook)
+        }
         ObservationStatus::Unhealthy(severity) => {
             fire_or_repeat(state, observation, severity, policy, runbook)
         }
     }
+}
+
+fn resolve_lower_severity(
+    state: &mut CheckState,
+    observation: &Observation,
+    lower_severity: Severity,
+    policy: &AlarmPolicy,
+    runbook: Option<String>,
+) -> Option<AlertEvent> {
+    let started_at = state.firing_since?;
+    let recovering = *state
+        .recovering_since
+        .get_or_insert(observation.observed_at);
+    if elapsed(observation.observed_at, recovering) < policy.recover_for {
+        return None;
+    }
+    let severity = state.severity;
+    state.firing_since = None;
+    state.recovering_since = None;
+    state.pending_since = Some(observation.observed_at);
+    state.last_sent_at = Some(observation.observed_at);
+    state.severity = Severity::Ok;
+    let mut event = event(
+        observation,
+        severity,
+        Transition::Resolved,
+        started_at,
+        runbook,
+    );
+    event.details.insert(
+        "分级变化".into(),
+        format!(
+            "{} 已恢复；当前仍有 {} 风险",
+            severity.label(),
+            lower_severity.label()
+        ),
+    );
+    Some(event)
 }
 
 fn resolve(
@@ -268,6 +311,39 @@ mod tests {
                 .transition,
             Transition::Resolved
         );
+    }
+
+    #[test]
+    fn critical_to_warn_sends_critical_recovery_then_restarts_warning_debounce() {
+        let mut state = CheckState::default();
+        let mut observation = Observation::unhealthy("book", Severity::Critical, "global risk");
+        assert!(evaluate(&mut state, &observation, &policy(), None).is_none());
+        shift_time(&mut observation, 10);
+        assert_eq!(
+            evaluate(&mut state, &observation, &policy(), None)
+                .unwrap()
+                .severity,
+            Severity::Critical
+        );
+
+        shift_time(&mut observation, 1);
+        observation.status = ObservationStatus::Unhealthy(Severity::Warn);
+        assert!(evaluate(&mut state, &observation, &policy(), None).is_none());
+        shift_time(&mut observation, 10);
+        let recovery = evaluate(&mut state, &observation, &policy(), None).unwrap();
+        assert_eq!(recovery.transition, Transition::Resolved);
+        assert_eq!(recovery.severity, Severity::Critical);
+        assert_eq!(
+            recovery.details["分级变化"],
+            "CRITICAL 已恢复；当前仍有 WARN 风险"
+        );
+
+        shift_time(&mut observation, 9);
+        assert!(evaluate(&mut state, &observation, &policy(), None).is_none());
+        shift_time(&mut observation, 1);
+        let warning = evaluate(&mut state, &observation, &policy(), None).unwrap();
+        assert_eq!(warning.transition, Transition::Firing);
+        assert_eq!(warning.severity, Severity::Warn);
     }
 
     #[test]

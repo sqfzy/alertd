@@ -460,14 +460,8 @@ fn process_observation(
         return true;
     };
     let text = report::format_alert(report_context, &event);
-    let accepted = enqueue_check(
-        queue,
-        &check.name,
-        &check.delivery_route,
-        event.severity,
-        text,
-        dry_run,
-    );
+    let route = check.delivery_route_for(event.severity);
+    let accepted = enqueue_check(queue, &check.name, route, event.severity, text, dry_run);
     if !accepted {
         *state = previous;
     }
@@ -1166,6 +1160,61 @@ critical_available_pct = 10
                 .last_external_report_id
                 .as_deref(),
             Some("report-1")
+        );
+    }
+
+    #[test]
+    fn observation_uses_the_route_matching_its_event_severity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.delivery.routes.extend([
+            config::DeliveryRoute {
+                name: "p2".into(),
+                token_env: "P2_TOKEN".into(),
+                secret_env: None,
+                at_all_on_critical: false,
+            },
+            config::DeliveryRoute {
+                name: "p1".into(),
+                token_env: "P1_TOKEN".into(),
+                secret_env: None,
+                at_all_on_critical: false,
+            },
+        ]);
+        config.checks[0].pending_for = Some("0s".into());
+        config.checks[0].warn_delivery_route = Some("p2".into());
+        config.checks[0].critical_delivery_route = Some("p1".into());
+        let check = &config.checks[0];
+        let policy = AlarmPolicy::from_strings("0s", "0s", "30m", "10m").unwrap();
+        let queue = DeliveryQueue::open(temporary.path(), 16).unwrap();
+        let mut state = CheckState::default();
+
+        assert!(process_observation(
+            check,
+            Observation::unhealthy("memory", Severity::Warn, "local risk"),
+            &mut state,
+            &policy,
+            test_report_context(),
+            &queue,
+            false,
+        ));
+        assert_eq!(
+            queue.oldest_for_route("p2").unwrap().unwrap().1.severity,
+            Severity::Warn
+        );
+
+        assert!(process_observation(
+            check,
+            Observation::unhealthy("memory", Severity::Critical, "global risk"),
+            &mut state,
+            &policy,
+            test_report_context(),
+            &queue,
+            false,
+        ));
+        assert_eq!(
+            queue.oldest_for_route("p1").unwrap().unwrap().1.severity,
+            Severity::Critical
         );
     }
 

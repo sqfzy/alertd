@@ -9,7 +9,7 @@
 | 类别 | 项目 | 形态 | 语义 |
 |---|---|---|---|
 | 输入 | observation 快照 | 最大 64 KiB JSON 文件 | 原子替换；状态为 `ok`、`warn` 或 `critical` |
-| 输入 | delivery route | `default` 或已配置名称 | check 告警与报告的稳定投递目标 |
+| 输入 | delivery route | `default` 或已配置名称 | `delivery_route` 是报告与未分级告警的回退目标；可选 WARN/CRITICAL route 分别接收对应等级的告警与恢复 |
 | 成功输出 | AlertEvent | 既有告警事件 | 快照状态进入既有状态机 |
 | 成功输出 | 专项报告 | 持久队列消息 | 新 report ID 仅在成功入队后确认 |
 | 降级输出 | stale/missing | configured severity | 快照不可用属于被监控对象异常 |
@@ -19,6 +19,8 @@
 
 - 同一 spool 共享容量，但每个 route 独立 FIFO、客户端与退避。
 - route 在消息入队时写入队列文件；热加载不得重定向已入队消息。
+- `warn_delivery_route` 与 `critical_delivery_route` 只影响告警生命周期；`forward_report` 始终走 `delivery_route`。
+- P1/CRITICAL 降为 P2/WARN 时，先向原 CRITICAL route 发送恢复，再从新的 WARN 观察重新开始防抖；alertd 不把它伪装成全量恢复。
 - 内部事件和日报固定走 `default`；非 default route 故障经 `default` 报告。
 - 旧队列消息没有 route 时视为 `default`，不得丢弃或改投其他 route。
 - 只有快照文件 mtime 决定新鲜度；业务状态的新鲜度由生产者在快照中判断。
@@ -29,7 +31,7 @@
 flowchart TD
     S1[生产者原子写 observation JSON] --> S2[alertd 打开并校验快照]
     S2 --> S3[转换为 Observation 与可选 report]
-    S3 --> S4[告警引擎与持久队列]
+    S3 --> S4[按状态选择 WARN/CRITICAL 或回退 route]
     S4 --> S5[按冻结 route 独立投递]
 ```
 

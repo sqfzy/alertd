@@ -56,7 +56,8 @@ at_all_on_critical = false
 # 所有 check 的 name 全局唯一（1..=128 字节）。enabled 默认 true，
 # severity 默认 critical；pending_for/recover_for 可覆盖全局 0s..=24h，
 # runbook 可选且必须为 HTTP(S) URL。
-# delivery_route 默认 default；日报与 alertd 自监控始终走 default。
+# delivery_route 默认 default，并作为未指定等级 route 的回退；日报与 alertd 自监控始终走 default。
+# warn_delivery_route / critical_delivery_route 仅重定向告警及其恢复消息；专项报告仍走 delivery_route。
 [[checks]]
 name = "bybit-market"
 type = "process"
@@ -72,6 +73,8 @@ type = "observation_file"
 path = "/run/live-mm-observer/health.json"
 stale_after = "30s"
 delivery_route = "live-mm"
+warn_delivery_route = "live-mm"
+critical_delivery_route = "default"
 
 [[checks]]
 name = "live-mm-statistics"

@@ -74,6 +74,8 @@ path = "/run/live-mm-observer/health.json"
 stale_after = "30s"
 forward_report = true
 delivery_route = "live-mm"
+warn_delivery_route = "default"
+critical_delivery_route = "live-mm"
 "#;
     let config: Config = toml::from_str(text).unwrap();
     config::validate_config(&config).unwrap();
@@ -84,6 +86,14 @@ delivery_route = "live-mm"
         text.replace(
             "delivery_route = \"live-mm\"",
             "delivery_route = \"missing\"",
+        ),
+        text.replace(
+            "warn_delivery_route = \"default\"",
+            "warn_delivery_route = \"missing\"",
+        ),
+        text.replace(
+            "critical_delivery_route = \"live-mm\"",
+            "critical_delivery_route = \"missing\"",
         ),
         text.replace(
             "token_env = \"LIVE_MM_DINGTALK_TOKEN\"",
@@ -97,6 +107,25 @@ delivery_route = "live-mm"
             "accepted: {invalid}"
         );
     }
+}
+
+#[test]
+fn delivery_routes_can_differ_by_observation_severity() {
+    let text = valid().replace(
+        "mount = \"/\"",
+        "mount = \"/\"\nwarn_delivery_route = \"default\"\ncritical_delivery_route = \"default\"",
+    );
+    let config: Config = toml::from_str(&text).unwrap();
+    let check = &config.checks[0];
+
+    assert_eq!(
+        check.delivery_route_for(alertd::model::Severity::Warn),
+        "default"
+    );
+    assert_eq!(
+        check.delivery_route_for(alertd::model::Severity::Critical),
+        "default"
+    );
 }
 
 #[test]

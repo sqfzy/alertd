@@ -27,12 +27,24 @@ name = "default"
 token_env = "ALERTD_LIVE_MM_DINGTALK_TOKEN"
 at_all_on_critical = false
 
+[[delivery.routes]]
+name = "live-mm-p2"
+token_env = "ALERTD_LIVE_MM_P2_DINGTALK_TOKEN"
+at_all_on_critical = false
+
+[[delivery.routes]]
+name = "live-mm-p1"
+token_env = "ALERTD_LIVE_MM_P1_DINGTALK_TOKEN"
+at_all_on_critical = false
+
 [[checks]]
 name = "live-mm-health"
 severity = "critical"
 type = "observation_file"
 path = "/run/live-mm-observer/health.json"
 stale_after = "30s"
+warn_delivery_route = "live-mm-p2"
+critical_delivery_route = "live-mm-p1"
 
 [[checks]]
 name = "live-mm-statistics"

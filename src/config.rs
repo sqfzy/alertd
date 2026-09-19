@@ -294,12 +294,30 @@ pub struct CheckConfig {
     pub runbook: Option<String>,
     #[serde(default = "default_delivery_route")]
     pub delivery_route: String,
+    pub warn_delivery_route: Option<String>,
+    pub critical_delivery_route: Option<String>,
     #[serde(flatten)]
     pub kind: CheckKind,
 }
 
 fn default_delivery_route() -> String {
     "default".into()
+}
+
+impl CheckConfig {
+    pub fn delivery_route_for(&self, severity: Severity) -> &str {
+        match severity {
+            Severity::Warn => self
+                .warn_delivery_route
+                .as_deref()
+                .unwrap_or(&self.delivery_route),
+            Severity::Critical => self
+                .critical_delivery_route
+                .as_deref()
+                .unwrap_or(&self.delivery_route),
+            Severity::Ok => &self.delivery_route,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -580,6 +598,20 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
                 "check {} references unknown delivery route {:?}",
                 check.name, check.delivery_route
             )));
+        }
+        for route in [
+            check.warn_delivery_route.as_deref(),
+            check.critical_delivery_route.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !routes.contains(route) {
+                return Err(ConfigError::Invalid(format!(
+                    "check {} references unknown severity delivery route {:?}",
+                    check.name, route
+                )));
+            }
         }
         if let Some(value) = &check.pending_for {
             duration_range(
