@@ -298,6 +298,8 @@ pub struct CheckConfig {
     pub critical_delivery_route: Option<String>,
     pub warn_notification_label: Option<String>,
     pub critical_notification_label: Option<String>,
+    #[serde(default = "default_true")]
+    pub notification_include_summary: bool,
     #[serde(default)]
     pub notification_detail_keys: Vec<String>,
     #[serde(flatten)]

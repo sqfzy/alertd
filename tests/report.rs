@@ -84,11 +84,13 @@ fn configured_notification_keeps_only_selected_details() {
         context(None),
         &event,
         Some("P2 · live_mm 风控"),
+        false,
         &["监控摘要".into()],
     );
 
     assert!(text.starts_with("🟡 **P2 · live_mm 风控 · 告警**"));
     assert!(text.contains("**监控摘要：** 实例：live_mm4｜服务：active"));
+    assert!(!text.contains("**状态：**"));
     assert!(!text.contains("原始风险"));
 }
 

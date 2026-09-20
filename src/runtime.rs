@@ -463,6 +463,7 @@ fn process_observation(
         report_context,
         &event,
         check.notification_label_for(event.severity),
+        check.notification_include_summary,
         &check.notification_detail_keys,
     );
     let route = check.delivery_route_for(event.severity);

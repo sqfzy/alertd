@@ -132,7 +132,7 @@ fn delivery_routes_can_differ_by_observation_severity() {
 fn validates_compact_notification_presentation() {
     let text = valid().replace(
         "mount = \"/\"",
-        "mount = \"/\"\nwarn_notification_label = \"P2 · live_mm 风控\"\ncritical_notification_label = \"P1 · live_mm 风控\"\nnotification_detail_keys = [\"监控摘要\"]",
+        "mount = \"/\"\nwarn_notification_label = \"P2 · live_mm 风控\"\ncritical_notification_label = \"P1 · live_mm 风控\"\nnotification_include_summary = false\nnotification_detail_keys = [\"监控摘要\"]",
     );
     let config: Config = toml::from_str(&text).unwrap();
     config::validate_config(&config).unwrap();
@@ -143,6 +143,7 @@ fn validates_compact_notification_presentation() {
         Some("P2 · live_mm 风控")
     );
     assert_eq!(check.notification_detail_keys, ["监控摘要"]);
+    assert!(!check.notification_include_summary);
 
     for invalid in [
         text.replace(

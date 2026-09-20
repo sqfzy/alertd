@@ -17,13 +17,14 @@ pub struct ReportContext<'a> {
 }
 
 pub fn format_alert(context: ReportContext<'_>, event: &AlertEvent) -> String {
-    format_alert_with_notification(context, event, None, &[])
+    format_alert_with_notification(context, event, None, true, &[])
 }
 
 pub fn format_alert_with_notification(
     context: ReportContext<'_>,
     event: &AlertEvent,
     notification_label: Option<&str>,
+    notification_include_summary: bool,
     notification_detail_keys: &[String],
 ) -> String {
     if event.transition == Transition::Event {
@@ -43,7 +44,9 @@ pub fn format_alert_with_notification(
     }
     push_identity(&mut text, context);
     push_field(&mut text, "检查", &event.check_name);
-    push_field(&mut text, "状态", &event.summary);
+    if notification_include_summary {
+        push_field(&mut text, "状态", &event.summary);
+    }
     push_field(&mut text, "异常开始", &format_beijing(event.started_at));
     for (key, value) in notification_details(event, notification_detail_keys) {
         if !key.starts_with('_') && !value.is_empty() {

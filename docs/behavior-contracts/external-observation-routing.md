@@ -22,6 +22,7 @@
 - route 在消息入队时写入队列文件；热加载不得重定向已入队消息。
 - `warn_delivery_route` 与 `critical_delivery_route` 只影响告警生命周期；`forward_report` 始终走 `delivery_route`。
 - `warn_notification_label`、`critical_notification_label` 可替换对应严重级别的通知标题；未配置时保留 `WARN`、`CRITICAL`。
+- `notification_include_summary` 为 `bool`，默认 `true`；设为 `false` 时省略通用“状态”行，供 detail 已完整表达当前事实的观察器使用。
 - 空 `notification_detail_keys` 保留既有全部详情；非空时按配置顺序只显示存在且非内部的 detail key。
 - P1/CRITICAL 降为 P2/WARN 时，先向原 CRITICAL route 发送恢复，再从新的 WARN 观察重新开始防抖；alertd 不把它伪装成全量恢复。
 - 内部事件和日报固定走 `default`；非 default route 故障经 `default` 报告。
