@@ -86,12 +86,36 @@ fn configured_notification_keeps_only_selected_details() {
         Some("P2 · live_mm 风控"),
         false,
         &["监控摘要".into()],
+        None,
     );
 
     assert!(text.starts_with("🟡 **P2 · live_mm 风控 · 告警**"));
     assert!(text.contains("**监控摘要：** 实例：live_mm4｜服务：active"));
     assert!(!text.contains("**状态：**"));
     assert!(!text.contains("原始风险"));
+}
+
+#[test]
+fn configured_notification_renders_producer_body_without_a_field_label() {
+    let event = AlertEvent {
+        check_name: "observation".into(),
+        severity: Severity::Warn,
+        transition: Transition::Firing,
+        started_at: Utc.with_ymd_and_hms(2026, 9, 20, 12, 0, 0).unwrap(),
+        observed_at: Utc.with_ymd_and_hms(2026, 9, 20, 12, 0, 0).unwrap(),
+        summary: "ignored".into(),
+        details: BTreeMap::from([("监控摘要".into(), "### 🟡 live_mm4\n\n**入口**：开".into())]),
+        runbook: None,
+    };
+
+    let text = report::format_alert_with_notification(
+        context(None), &event, Some("P2 · LIVE_MM 风控"), false,
+        &["监控摘要".into()], Some("监控摘要"),
+    );
+
+    assert!(text.contains("---\n\n### 🟡 live_mm4"));
+    assert!(text.contains("**入口**：开"));
+    assert!(!text.contains("**监控摘要：**"));
 }
 
 #[test]

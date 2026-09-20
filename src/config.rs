@@ -302,6 +302,7 @@ pub struct CheckConfig {
     pub notification_include_summary: bool,
     #[serde(default)]
     pub notification_detail_keys: Vec<String>,
+    pub notification_detail_body_key: Option<String>,
     #[serde(flatten)]
     pub kind: CheckKind,
 }
@@ -645,6 +646,15 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
                 )));
             }
             validate_notification_text("checks notification detail key", key)?;
+        }
+        if let Some(key) = &check.notification_detail_body_key {
+            validate_notification_text("checks notification detail body key", key)?;
+            if !notification_keys.contains(key) {
+                return Err(ConfigError::Invalid(format!(
+                    "check {} notification detail body key {:?} is not selected",
+                    check.name, key
+                )));
+            }
         }
         if let Some(value) = &check.pending_for {
             duration_range(
