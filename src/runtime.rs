@@ -465,6 +465,7 @@ fn process_observation(
         check.notification_label_for(event.severity),
         check.notification_include_summary,
         &check.notification_detail_keys,
+        check.notification_detail_body_key.as_deref(),
     );
     let route = check.delivery_route_for(event.severity);
     let accepted = enqueue_check(queue, &check.name, route, event.severity, text, dry_run);

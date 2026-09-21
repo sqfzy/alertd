@@ -24,6 +24,7 @@
 - `warn_notification_label`、`critical_notification_label` 可替换对应严重级别的通知标题；未配置时保留 `WARN`、`CRITICAL`。
 - `notification_include_summary` 为 `bool`，默认 `true`；设为 `false` 时省略通用“状态”行，供 detail 已完整表达当前事实的观察器使用。
 - 空 `notification_detail_keys` 保留既有全部详情；非空时按配置顺序只显示存在且非内部的 detail key。
+- `notification_detail_body_key` 为可选 detail key，默认未设置；设置后 alertd 原样渲染该 key 的 Markdown 值而不附加字段标题。它只控制呈现，不解析 producer 的业务字段或改变告警状态机。
 - P1/CRITICAL 降为 P2/WARN 时，先向原 CRITICAL route 发送恢复，再从新的 WARN 观察重新开始防抖；alertd 不把它伪装成全量恢复。
 - 内部事件和日报固定走 `default`；非 default route 故障经 `default` 报告。
 - 旧队列消息没有 route 时视为 `default`，不得丢弃或改投其他 route。
