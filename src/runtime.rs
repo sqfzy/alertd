@@ -111,6 +111,8 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
         ..Default::default()
     };
     let mut health = RuntimeHealth::default();
+    let mut systemd_workers = collectors::systemd::Workers::new(&config);
+    systemd_workers.reconcile(&config, config.runtime.enabled);
     info!(
         host = initial_identity.host,
         system_hostname = initial_identity.system_hostname,
@@ -133,6 +135,9 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
                 &identity,
                 options.dry_run,
             );
+            // 配置热加载后丢弃旧 unit 快照；worker 的命令参数和周期必须同步更新。
+            systemd_workers.clear();
+            systemd_workers.reconcile(&config, config.runtime.enabled);
         }
         let current_identity = read_identity(&identity);
         let report_context = report_context(&current_identity);
@@ -150,6 +155,7 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
             &mut context,
             &queue,
             options.dry_run,
+            &systemd_workers,
         );
         maybe_external_reports(
             &config,
@@ -182,6 +188,7 @@ pub fn run(options: RuntimeOptions) -> Result<(), RuntimeError> {
         );
     }
     info!("alertd stopping");
+    systemd_workers.shutdown();
     notify_systemd("STOPPING=1");
     persistent.clean_shutdown = Some(true);
     if let Err(error) = state::save(&config.runtime.state_dir, &persistent) {
@@ -312,12 +319,21 @@ fn run_monitoring_cycle(
     context: &mut CollectContext,
     queue: &DeliveryQueue,
     dry_run: bool,
+    systemd_workers: &collectors::systemd::Workers,
 ) -> Vec<Observation> {
     if !config.runtime.enabled {
         debug!("monitoring cycle skipped because runtime.enabled=false");
         return Vec::new();
     }
-    let observations = run_checks(config, report_context, persistent, context, queue, dry_run);
+    let observations = run_checks(
+        config,
+        report_context,
+        persistent,
+        context,
+        queue,
+        dry_run,
+        systemd_workers,
+    );
     persistent
         .journal_cursors
         .clone_from(&context.journal_cursors);
@@ -339,6 +355,7 @@ fn run_checks(
     context: &mut CollectContext,
     queue: &DeliveryQueue,
     dry_run: bool,
+    systemd_workers: &collectors::systemd::Workers,
 ) -> Vec<Observation> {
     let mut observations = Vec::new();
     let global_policy = AlarmPolicy::from_strings(
@@ -349,6 +366,34 @@ fn run_checks(
     )
     .expect("validated config");
     for check in config.checks.iter().filter(|check| check.enabled) {
+        if matches!(check.kind, config::CheckKind::Systemd { .. }) {
+            let read = systemd_workers.read(check, config);
+            let collector_name = read.collector.check_name.clone();
+            let collector_state = persistent.checks.entry(collector_name).or_default();
+            process_observation(
+                check,
+                read.collector,
+                collector_state,
+                &global_policy,
+                report_context,
+                queue,
+                dry_run,
+            );
+            if let Some(observation) = read.service {
+                let state = persistent.checks.entry(check.name.clone()).or_default();
+                process_observation(
+                    check,
+                    observation,
+                    state,
+                    &global_policy,
+                    report_context,
+                    queue,
+                    dry_run,
+                );
+            }
+            observations.push(read.daily);
+            continue;
+        }
         match collectors::collect(check, context) {
             Ok(observation) => {
                 resolve_collector_alarm(
@@ -1585,6 +1630,7 @@ critical_available_pct = 10
             .pending_journal_cursors
             .insert("journal".into(), "pending".into());
 
+        let workers = collectors::systemd::Workers::new(&config);
         let observations = run_monitoring_cycle(
             &config,
             test_report_context(),
@@ -1592,6 +1638,7 @@ critical_available_pct = 10
             &mut context,
             &queue,
             false,
+            &workers,
         );
 
         assert_eq!(serde_json::to_value(&persistent).unwrap(), before);

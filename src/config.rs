@@ -24,6 +24,12 @@ fn default_log_level() -> String {
 fn default_command_timeout() -> String {
     "3s".into()
 }
+fn default_systemd_probe_interval() -> String {
+    "30s".into()
+}
+fn default_systemd_stale_after() -> String {
+    "90s".into()
+}
 fn default_pending() -> String {
     "90s".into()
 }
@@ -111,6 +117,10 @@ pub struct RuntimeConfig {
     pub log_level: String,
     #[serde(default = "default_command_timeout")]
     pub command_timeout: String,
+    #[serde(default = "default_systemd_probe_interval")]
+    pub systemd_probe_interval: String,
+    #[serde(default = "default_systemd_stale_after")]
+    pub systemd_stale_after: String,
 }
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -122,6 +132,8 @@ impl Default for RuntimeConfig {
             state_dir: default_state_dir(),
             log_level: default_log_level(),
             command_timeout: default_command_timeout(),
+            systemd_probe_interval: default_systemd_probe_interval(),
+            systemd_stale_after: default_systemd_stale_after(),
         }
     }
 }
@@ -231,6 +243,8 @@ pub enum CheckKind {
     },
     Systemd {
         units: Vec<String>,
+        probe_interval: Option<String>,
+        stale_after: Option<String>,
     },
     LatestFile {
         directory: PathBuf,
@@ -497,6 +511,18 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
         Duration::from_millis(200),
         Duration::from_secs(30),
     )?;
+    let systemd_probe_interval = duration_range(
+        "runtime.systemd_probe_interval",
+        &config.runtime.systemd_probe_interval,
+        Duration::from_secs(5),
+        Duration::from_secs(3600),
+    )?;
+    duration_range(
+        "runtime.systemd_stale_after",
+        &config.runtime.systemd_stale_after,
+        systemd_probe_interval,
+        Duration::from_secs(86400),
+    )?;
     if let Some(host) = &config.runtime.host {
         if host.is_empty() || host.len() > 128 || host.chars().any(char::is_control) {
             return Err(ConfigError::Invalid(
@@ -680,7 +706,7 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
                 )));
             }
         }
-        validate_check(check, interval)?;
+        validate_check(check, interval, systemd_probe_interval)?;
     }
     Ok(())
 }
@@ -706,7 +732,11 @@ fn validate_clock(value: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigError> {
+fn validate_check(
+    check: &CheckConfig,
+    interval: Duration,
+    systemd_probe_interval: Duration,
+) -> Result<(), ConfigError> {
     match &check.kind {
         CheckKind::Process {
             cmdline_contains,
@@ -795,15 +825,38 @@ fn validate_check(check: &CheckConfig, interval: Duration) -> Result<(), ConfigE
             )?;
             Ok(())
         }
-        CheckKind::Systemd { units }
+        CheckKind::Systemd {
+            units,
+            probe_interval,
+            stale_after,
+        } => {
             if units.is_empty()
                 || units.len() > 64
-                || units.iter().any(|unit| unit.is_empty() || unit.len() > 255) =>
-        {
-            Err(ConfigError::Invalid(format!(
-                "check {} needs 1..=64 non-empty systemd units",
-                check.name
-            )))
+                || units.iter().any(|unit| unit.is_empty() || unit.len() > 255)
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "check {} needs 1..=64 non-empty systemd units",
+                    check.name
+                )));
+            }
+            let probe = match probe_interval {
+                Some(value) => duration_range(
+                    "checks.systemd.probe_interval",
+                    value,
+                    Duration::from_secs(5),
+                    Duration::from_secs(3600),
+                )?,
+                None => systemd_probe_interval,
+            };
+            if let Some(value) = stale_after {
+                duration_range(
+                    "checks.systemd.stale_after",
+                    value,
+                    probe,
+                    Duration::from_secs(86400),
+                )?;
+            }
+            Ok(())
         }
         CheckKind::LatestFile {
             directory,

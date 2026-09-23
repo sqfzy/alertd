@@ -2,11 +2,21 @@ use super::CollectError;
 use std::{
     io::Read,
     process::{Command, Output, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant},
 };
 
 pub fn run(program: &str, arguments: &[&str], timeout: Duration) -> Result<Output, CollectError> {
+    run_cancellable(program, arguments, timeout, &AtomicBool::new(false))
+}
+
+pub fn run_cancellable(
+    program: &str,
+    arguments: &[&str],
+    timeout: Duration,
+    cancelled: &AtomicBool,
+) -> Result<Output, CollectError> {
     let mut command = Command::new(program);
     command
         .args(arguments)
@@ -38,7 +48,7 @@ pub fn run(program: &str, arguments: &[&str], timeout: Duration) -> Result<Outpu
                 stderr: stderr_reader.join().map_err(|_| reader_error())??,
             });
         }
-        if Instant::now() >= deadline {
+        if cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline {
             #[cfg(unix)]
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
@@ -48,9 +58,11 @@ pub fn run(program: &str, arguments: &[&str], timeout: Duration) -> Result<Outpu
             let _ = child.wait();
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
-            return Err(CollectError::Timeout(format!(
-                "{program} exceeded {timeout:?}"
-            )));
+            return Err(if cancelled.load(Ordering::Relaxed) {
+                CollectError::Cancelled
+            } else {
+                CollectError::Timeout(format!("{program} exceeded {timeout:?}"))
+            });
         }
         thread::sleep(Duration::from_millis(20));
     }

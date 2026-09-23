@@ -14,6 +14,9 @@ state_dir = "/var/lib/alertd"
 log_level = "info"
 # 外部命令超时：200ms..=30s。
 command_timeout = "3s"
+# systemd 后台探测周期与缓存最大年龄；范围分别为 5s..=1h、周期..=24h。
+systemd_probe_interval = "30s"
+systemd_stale_after = "90s"
 
 [alarm]
 # 全局异常等待与恢复防抖：0s..=24h；单个 check 可覆盖。
@@ -121,6 +124,9 @@ name = "market-units"
 type = "systemd"
 # 1..=64 个非空 service/timer unit。
 units = ["market.service", "market-archive.timer"]
+# 可选覆盖全局 worker 周期和缓存最大年龄。
+probe_interval = "60s"
+stale_after = "180s"
 
 [[checks]]
 name = "market-raw"

@@ -63,9 +63,9 @@ journalctl -u alertd -n 50 --no-pager
 
 允许热更新：
 
-- `runtime.enabled`、`runtime.host`、`runtime.ip`、`runtime.interval`
+- `runtime.enabled`、`runtime.host`、`runtime.ip`、`runtime.interval`、`runtime.systemd_probe_interval`、`runtime.systemd_stale_after`
 - 全部 alarm policy 与日报时间
-- checks 的增加、删除和修改
+- checks 的增加、删除和修改（包括 systemd 的 `probe_interval`、`stale_after`）
 
 拒绝整次热加载：
 

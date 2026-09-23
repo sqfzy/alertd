@@ -209,6 +209,7 @@ pub fn format_daily(
     let mut resource_checks = 0_usize;
     let mut cpu_rows = None;
     let mut applications = (0, 0);
+    let mut systemd_degraded = Vec::new();
     let mut data_chain = (0, 0);
     let mut business_metrics = Vec::new();
     let mut platform = Vec::new();
@@ -231,9 +232,24 @@ pub fn format_daily(
                     resources.push(format_unavailable_check(check, observations));
                 }
             }
-            CheckKind::Process { .. } | CheckKind::Systemd { .. } => {
+            CheckKind::Process { .. } => {
                 applications.1 += 1;
                 applications.0 += usize::from(observation.is_some_and(is_healthy));
+            }
+            CheckKind::Systemd { .. } => {
+                applications.1 += 1;
+                if let Some(item) = observation {
+                    if item.details.contains_key("_systemd_cache") {
+                        systemd_degraded.push(format!("{}: {}", check.name, item.summary));
+                    } else {
+                        applications.0 += usize::from(is_healthy(item));
+                        if let Some(detail) = item.details.get("采集状态") {
+                            systemd_degraded.push(format!("{}: {detail}", check.name));
+                        }
+                    }
+                } else {
+                    systemd_degraded.push(format!("{}: 等待状态", check.name));
+                }
             }
             CheckKind::Shm { .. } | CheckKind::LatestFile { .. } => {
                 data_chain.1 += 1;
@@ -270,7 +286,16 @@ pub fn format_daily(
         push_field(
             &mut text,
             "进程/systemd",
-            &format!("{}/{} 正常", applications.0, applications.1),
+            &if systemd_degraded.is_empty() {
+                format!("{}/{} 正常", applications.0, applications.1)
+            } else {
+                format!(
+                    "{}/{} 正常\n{}",
+                    applications.0,
+                    applications.1,
+                    systemd_degraded.join("\n")
+                )
+            },
         );
     }
     if data_chain.1 > 0 {

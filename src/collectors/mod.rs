@@ -34,6 +34,8 @@ pub enum CollectError {
     Unsupported(String),
     #[error("command timeout: {0}")]
     Timeout(String),
+    #[error("command cancelled")]
+    Cancelled,
 }
 
 #[derive(Default)]
@@ -84,7 +86,9 @@ pub fn collect(
             ignore_contains,
             rules,
         } => journal::collect(check, units, ignore_contains, rules, context),
-        CheckKind::Systemd { units } => systemd::collect(check, units, context.command_timeout),
+        CheckKind::Systemd { .. } => Err(CollectError::Invalid(
+            "systemd checks require the background worker".into(),
+        )),
         CheckKind::LatestFile {
             directory,
             prefix,
